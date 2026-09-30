@@ -1,0 +1,178 @@
+"""运行配置。
+
+所有可变参数都放在项目根目录的 .env 里，代码只读不写。密钥不进代码、不进版本库，
+换环境（换 key、换模型、换工作区）只需要改文件，不用动代码。
+
+配置在 Config.from_env() 里**一次性读取并校验**，之后整个进程用的都是这个对象。
+缺 key、步数写成汉字这类问题会在这里当场报错并说清楚是哪一项，而不是等到第一次
+调用模型时冒出一句听不懂的 401。
+
+典型用法::
+
+    from config import Config
+    cfg = Config.from_env()
+    provider = OpenAICompatProvider(
+        api_key=cfg.api_key, base_url=cfg.base_url, model=cfg.model,
+        timeout=cfg.timeout, extra_body=cfg.extra_body,
+    )
+"""
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+#: 项目根目录，即本文件所在目录。.env 和相对路径都以它为基准。
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+#: 默认接 DeepSeek，换兼容接口只改 .env，不用改代码。
+DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_MODEL = "deepseek-chat"
+
+_ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def _get(*names: str) -> str | None:
+    """按顺序取第一个非空环境变量，全空则返回 None。
+
+    支持多个名字是为了让 .env 里写 LLM_API_KEY 或 DEEPSEEK_API_KEY 都能生效，
+    按传入顺序优先。
+    """
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _resolve_path(raw: str) -> Path:
+    """把配置里的路径解析成绝对路径。
+
+    相对路径以**项目根目录**为基准而不是当前工作目录——否则从别的目录执行
+    ``python dshclaw/main.py``，workspace 会静默变成那个目录，工具沙箱的范围
+    跟着变，行为看起来就像随机。
+    """
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+@dataclass
+class Config:
+    """一份完整的运行配置。
+
+    Attributes:
+        api_key: 模型服务密钥，必填。
+        base_url: 接口地址。
+        model: 默认模型名。
+        workspace: agent 的工作区根目录，文件工具只能在这个范围内读写。
+        identity_file: 人设文件名，相对 workspace。
+        max_steps: 单轮对话最多调用模型的次数，防止任务不收敛时无限跑。
+        timeout: 单次模型请求超时（秒）。
+        extra_body: 透传给接口的额外请求体，如 DeepSeek 思考模式开关。
+        log_level: 日志级别，如 INFO / DEBUG。
+    """
+
+    api_key: str
+    base_url: str
+    model: str
+    workspace: Path
+    identity_file: str
+    max_steps: int
+    timeout: float
+    extra_body: dict | None
+    log_level: str
+
+    def __repr__(self) -> str:
+        """打印配置时遮住密钥，避免它随日志或报错信息泄漏出去。"""
+        masked = f"{self.api_key[:6]}…" if len(self.api_key) > 12 else "***"
+        return (
+            f"Config(api_key={masked!r}, base_url={self.base_url!r}, model={self.model!r}, "
+            f"workspace={str(self.workspace)!r}, identity_file={self.identity_file!r}, "
+            f"max_steps={self.max_steps}, timeout={self.timeout}, "
+            f"extra_body={self.extra_body!r}, log_level={self.log_level!r})"
+        )
+
+    @classmethod
+    def from_env(cls, env_file: Path | str | None = None) -> "Config":
+        """读取 .env 与环境变量，构造配置。
+
+        .env 只是补充：**已存在的真实环境变量优先**，不会被文件覆盖，方便临时用
+        ``LLM_MODEL=xxx python main.py`` 覆盖单项做实验。
+
+        Args:
+            env_file: 指定 .env 路径，默认项目根目录下的 .env。主要给测试用。
+
+        Returns:
+            校验通过的配置对象。
+
+        Raises:
+            ValueError: 缺少必填项，或某项格式不对（如步数不是正整数）。
+        """
+        load_dotenv(dotenv_path=env_file or _ENV_FILE, override=False)
+
+        api_key = _get("LLM_API_KEY", "DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError(
+                f"未配置 API key。请在 {_ENV_FILE} 中设置 LLM_API_KEY=你的密钥"
+                "（可参照同目录下的 .env.example），或直接设置同名环境变量。"
+            )
+
+        return cls(
+            api_key=api_key,
+            base_url=_get("LLM_BASE_URL", "DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL,
+            model=_get("LLM_MODEL", "DEEPSEEK_MODEL") or DEFAULT_MODEL,
+            workspace=_resolve_path(_get("AGENT_WORKSPACE") or "."),
+            identity_file=_get("AGENT_IDENTITY_FILE") or "identity.md",
+            max_steps=_get_int("AGENT_MAX_STEPS", 50, minimum=1),
+            timeout=_get_float("LLM_TIMEOUT", 120.0, minimum=0.1),
+            extra_body=_get_json("LLM_EXTRA_BODY"),
+            log_level=(_get("LOG_LEVEL") or "INFO").upper(),
+        )
+
+
+def _get_int(name: str, default: int, minimum: int | None = None) -> int:
+    """读取整数配置项，非法值直接报错并指明是哪个变量。"""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"配置项 {name} 必须是整数，当前值为 {raw!r}") from None
+    if minimum is not None and value < minimum:
+        raise ValueError(f"配置项 {name} 不能小于 {minimum}，当前值为 {value}")
+    return value
+
+
+def _get_float(name: str, default: float, minimum: float | None = None) -> float:
+    """读取浮点配置项，非法值直接报错并指明是哪个变量。"""
+    raw = _get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"配置项 {name} 必须是数字，当前值为 {raw!r}") from None
+    if minimum is not None and value < minimum:
+        raise ValueError(f"配置项 {name} 不能小于 {minimum}，当前值为 {value}")
+    return value
+
+
+def _get_json(name: str) -> dict | None:
+    """读取 JSON 对象配置项，未设置时返回 None。
+
+    解析失败不在启动时兜住的话，错误会一路带到请求里变成一个看不懂的参数错误，
+    所以这里直接失败并回显原值。
+    """
+    raw = _get(name)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"配置项 {name} 不是合法 JSON（{exc}），当前值为 {raw!r}") from None
+    if not isinstance(value, dict):
+        raise ValueError(f"配置项 {name} 必须是 JSON 对象，当前值为 {raw!r}")
+    return value
