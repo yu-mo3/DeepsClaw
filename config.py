@@ -18,7 +18,9 @@
 """
 
 import json
+import logging
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +34,9 @@ DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-chat"
 
 _ENV_FILE = PROJECT_ROOT / ".env"
+
+#: 提示用的常用日志级别，按严重程度递减
+_COMMON_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 def _get(*names: str) -> str | None:
@@ -128,8 +133,29 @@ class Config:
             max_steps=_get_int("AGENT_MAX_STEPS", 50, minimum=1),
             timeout=_get_float("LLM_TIMEOUT", 120.0, minimum=0.1),
             extra_body=_get_json("LLM_EXTRA_BODY"),
-            log_level=(_get("LOG_LEVEL") or "INFO").upper(),
+            log_level=_get_log_level(),
         )
+
+
+def _get_log_level() -> str:
+    """读取日志级别，取值不合法时退回 INFO 并提示。
+
+    这里不抛异常：日志级别写错不该让整个程序起不来。但不校验也不行——
+    ``logging.basicConfig(level="VERBOSE")`` 会直接抛 ValueError: Unknown level，
+    报错还发生在启动流程中段，看起来像是别的地方坏了。
+    """
+    raw = _get("LOG_LEVEL")
+    if raw is None:
+        return "INFO"
+    level = raw.upper()
+    if level not in logging.getLevelNamesMapping():
+        print(
+            f"警告：LOG_LEVEL={raw!r} 不是合法日志级别，已按 INFO 处理。"
+            f"可选值：{'/'.join(_COMMON_LOG_LEVELS)}",
+            file=sys.stderr,
+        )
+        return "INFO"
+    return level
 
 
 def _get_int(name: str, default: int, minimum: int | None = None) -> int:

@@ -117,6 +117,14 @@ class OpenAICompatProvider(LLMProvider):
             usage=_extract_usage(getattr(response, "usage", None)),
         )
 
+    async def aclose(self) -> None:
+        """关闭底层 HTTP 客户端，释放连接池。
+
+        进程退出前调用，让连接正常关闭而不是留给操作系统回收。关闭后实例不可
+        再用；调用方应当在确定不再发起请求时再调。
+        """
+        await self._client.close()
+
 
 def _extract_tool_calls(
     raw_tool_calls: Any,
