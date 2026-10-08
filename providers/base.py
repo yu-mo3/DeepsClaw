@@ -9,7 +9,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -37,6 +37,35 @@ class ToolCallRequest:
 
 
 @dataclass
+class StreamDelta:
+    """流式响应里的一段增量，是模型"正在说话"的最小单位。
+
+    只在**确实有文本**时产生：协议里的角色片（首片只带 role）、usage 尾片、
+    心跳片都是空的，provider 把它们过滤掉，避免上层收到一堆空事件。
+
+    content 与 reasoning 有可能同片都有（少见但合法），上层按两个事件分别处理。
+
+    Attributes:
+        content: 正文增量，追加到最终回复里。
+        reasoning: 思考增量，追加到最终的 reasoning_content 里。不是所有模型都有。
+    """
+
+    content: str = ""
+    reasoning: str = ""
+
+
+#: 流式增量回调：provider 每收到一段非空增量就 await 一次。
+#:
+#: 三条契约（实现 provider 时可以直接依赖，不必再做防御）：
+#: 1. 只在有文本时被调用；
+#: 2. 按增量到达顺序**串行** await，不会并发；
+#: 3. **保证不抛异常**——唯一的生产者是 AgentLoop 的事件出口，它内部吞掉了
+#:    sink 的异常。所以 provider 不必为回调包 try，否则回调里的真 bug 会被
+#:    "模型调用失败"的兜底 except 吞掉，排查时根本看不出问题在回调这一侧。
+OnDelta = Callable[[StreamDelta], Awaitable[None]]
+
+
+@dataclass
 class LLMResponse:
     """一次模型调用的统一响应。
 
@@ -52,13 +81,17 @@ class LLMResponse:
             判断异常终止，所以 provider 实现不要自行改写这个字段。
         usage: token 用量，形如 {"prompt_tokens": ..., "completion_tokens": ...,
             "total_tokens": ...}。各家字段名不完全一致，本层不做归一化，原样保留
-            以便排查成本问题。
+            以便排查成本问题。服务端最终没吐出 usage 时为空字典。
+        reasoning_content: 本条回复的思考过程全文。回答轮次里它是"模型为什么这么答"，
+            工具轮次里它是"模型为什么这么调"——后者必须原样回传给接口（见
+            ToolCallRequest.reasoning_content），前者只用于展示给用户。
     """
 
     content: str | None = None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, Any] = field(default_factory=dict)
+    reasoning_content: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -90,8 +123,14 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
+        on_delta: OnDelta | None = None,
     ) -> LLMResponse:
         """发送一轮对话请求并等待模型响应。
+
+        实现方应当**始终以流式方式请求**，再自己把分片累积成完整的 LLMResponse：
+        流式与累积共用同一套解析逻辑，就不会出现"带回调和不带回调结果不一致"
+        这类只在边角上发作的 bug（早期实现里这是两套代码，很难保证等价）。
+        带不带 on_delta 只影响"要不要边收边往外推"，不影响返回值。
 
         Args:
             messages: 完整的对话历史，OpenAI 格式。实现方需原样发送全部历史
@@ -101,6 +140,8 @@ class LLMProvider(ABC):
                 ToolRegistry.get_definitions()。为 None 或空列表时表示本轮
                 不允许调用工具。
             model: 指定模型名，为 None 时使用 provider 的默认模型。
+            on_delta: 增量回调，为 None 时只累积不往外推。契约见 OnDelta 的文档，
+                实现方可以直接依赖"回调不抛异常"这一条。
 
         Returns:
             归一化后的响应，工具调用各项已解析成 ToolCallRequest。

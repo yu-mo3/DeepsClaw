@@ -16,6 +16,10 @@
                 ▲                 │
                 └─────────────────┘
 
+循环过程中的每一步都会翻译成**输出事件**推给 OutputSink（见 agent.events）：
+模型的思考与正文增量、工具调用与结果、错误、以及收尾。本模块不打印任何东西，
+呈现方式由 sink 决定，将来接 WebSocket 前端时不必改这里一行代码。
+
 围绕这个循环有两类"防爆"措施，因为 agent 最常见的失控不是崩溃，而是转圈：
 
 - **_check_tool_loop**：模型一轮接一轮地发起完全相同的工具调用（陷进死胡同），
@@ -31,6 +35,7 @@
     # loop.history 即完整会话历史，可直接落盘
 """
 
+import asyncio
 import json
 import logging
 from collections import deque
@@ -38,10 +43,30 @@ from enum import Enum
 from typing import Any
 
 from agent.context import ContextBuilder
+from agent.events import (
+    REASON_CANCELLED,
+    REASON_ERROR,
+    REASON_FINISHED,
+    REASON_LOOP_BREAK,
+    REASON_MAX_STEPS,
+    AgentEvent,
+    ContentDelta,
+    ErrorEvent,
+    NullSink,
+    OutputSink,
+    ThinkingDelta,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnEndEvent,
+)
 from agent.tools.registry import ToolRegistry
-from providers.base import LLMProvider, LLMResponse, ToolCallRequest
+from providers.base import LLMProvider, LLMResponse, StreamDelta, ToolCallRequest
 
 logger = logging.getLogger(__name__)
+
+#: 工具结果在事件里的预览上限（字符）。模型拿到的始终是全文，只有订阅者收到截断——
+#: read_file 读一个几 MB 的文件，原样推到前端会直接把页面打死。
+TOOL_RESULT_PREVIEW_LIMIT = 2000
 
 
 class LoopCheck(Enum):
@@ -86,6 +111,7 @@ class AgentLoop:
         model: str | None = None,
         max_steps: int = 50,
         history: list[dict] | None = None,
+        sink: OutputSink | None = None,
     ) -> None:
         """初始化。
 
@@ -98,6 +124,8 @@ class AgentLoop:
                 每次工具调用后都要再问一次模型，所以它约等于"最多几轮工具"。
             history: 已有的会话历史，用于恢复会话。**按引用持有**，调用方
                 可以直接把 loop.history 落盘做持久化。
+            sink: 输出事件的接收方，为 None 时用 NullSink（什么都不做）。CLI 传
+                打印到终端的 sink，接前端时传推 WebSocket 的 sink，本类不关心区别。
         """
         self.provider = provider
         self.registry = registry
@@ -105,11 +133,18 @@ class AgentLoop:
         self.model = model
         self.max_steps = max_steps
         self.history: list[dict] = history if history is not None else []
+        self._sink: OutputSink = sink or NullSink()
+        # 本轮是第几次模型调用，打给事件的 step 字段用——前端按它分块，否则同一个
+        # turn 里多段思考会糊成一团、多轮回答会粘成同一个气泡。
+        self._step = 0
         # 滑动窗口只记录最近若干次调用的指纹，超出自动丢弃。
         self._tool_window: deque[str] = deque(maxlen=self.LOOP_WINDOW_SIZE)
 
     async def run(self, user_input: str = "") -> str:
         """执行一轮 Agent 循环，返回最终给用户看的文本。
+
+        全程把模型的思考、正文、工具调用推给 sink；返回值仍然保留（调用方可能
+        拿它落盘或做二次加工），但控制台那条路的呈现已经由事件负责。
 
         Args:
             user_input: 本轮用户输入。为空时表示"接着上次继续"——历史里已经有
@@ -117,48 +152,102 @@ class AgentLoop:
 
         Returns:
             模型的最终回复文本；出错、熔断或步数用尽时，返回对应的说明文本。
+            无论是哪种结局，输出端都会先收到一条 TurnEndEvent。
         """
         # 每轮重置：防爆针对的是"本次任务陷进死胡同"，用户上一轮问过什么不该算进来。
         self._tool_window.clear()
+        self._step = 0
 
         messages = self.context.build_messages(self.history, user_input)
         turn: list[dict] = []
         if user_input:
             turn.append({"role": "user", "content": user_input})
 
-        for _ in range(self.max_steps):
-            response = await self.provider.chat(
-                messages,
-                tools=self.registry.get_definitions(),
-                model=self.model,
+        reply = ""
+        reason = REASON_FINISHED
+        try:
+            for _ in range(self.max_steps):
+                response = await self.provider.chat(
+                    messages,
+                    tools=self.registry.get_definitions(),
+                    model=self.model,
+                    on_delta=self._on_delta,
+                )
+
+                if response.finish_reason == "error":
+                    # 不写入历史：模型没真正回复过，记进去会污染后续上下文。
+                    logger.error("模型调用失败，中止本轮: %s", response.content)
+                    reason = REASON_ERROR
+                    reply = response.content or "错误：模型调用失败"
+                    await self._emit(ErrorEvent(message=reply, step=self._step))
+                    return reply
+
+                assistant_message = self._build_assistant_message(response)
+                messages.append(assistant_message)
+                turn.append(assistant_message)
+
+                if not response.has_tool_calls:
+                    self._save_to_history(turn)
+                    reply = response.content or ""
+                    return reply
+
+                aborted = await self._run_tool_calls(response, messages, turn)
+                if aborted is not None:
+                    reason = REASON_LOOP_BREAK
+                    reply = aborted
+                    return reply
+
+                # 工具跑完要再问一次模型，那算本轮的新一步。
+                self._step += 1
+
+            # 走到这里说明步数耗尽：历史最后是一条 tool 消息，结构仍然合法，
+            # 补一条 assistant 说明后照常保存。
+            notice = (
+                f"已达到单轮最大步数（{self.max_steps} 步）仍未完成任务，已停止。"
+                "请把需求拆分成更小的步骤后重试。"
             )
+            self._save_to_history([*turn, {"role": "assistant", "content": notice}])
+            logger.warning("达到 max_steps=%d，强制结束本轮", self.max_steps)
+            reason = REASON_MAX_STEPS
+            reply = notice
+            return reply
+        except asyncio.CancelledError:
+            # 取消不写历史，这正是 main.py 敢承诺"中途取消不留半截消息"的原因。
+            reason = REASON_CANCELLED
+            raise
+        except Exception:
+            # 预期外的异常（代码 bug、context 构建失败等）不额外发 ErrorEvent：
+            # 调用方手里有异常对象本身，比一段字符串全。只标 reason，让前端能把
+            # busy 状态解开。ErrorEvent 只服务上面那条已归一的模型失败路径。
+            reason = REASON_ERROR
+            raise
+        finally:
+            # 四个显式出口 + 取消 + 异常两条隐形出口，统一在这里收尾。逐个 return
+            # 前手写 emit 一定会漏其中某一条。
+            await self._emit(TurnEndEvent(reply=reply, reason=reason))
 
-            if response.finish_reason == "error":
-                # 不写入历史：模型没真正回复过，记进去会污染后续上下文。
-                logger.error("模型调用失败，中止本轮: %s", response.content)
-                return response.content or "错误：模型调用失败"
+    async def _emit(self, event: AgentEvent) -> None:
+        """把事件推给输出端。
 
-            assistant_message = self._build_assistant_message(response)
-            messages.append(assistant_message)
-            turn.append(assistant_message)
+        **本方法永不抛异常**：sink 是外接的（将来可能是往 WebSocket 推），它崩了
+        不能带崩正在跑的 agent 任务——UI 断连不该让任务失败。所以这里吞掉异常只
+        记 warning，provider 那边也因此可以放心地不做防御（见 OnDelta 契约）。
+        """
+        try:
+            await self._sink.emit(event)
+        except Exception:  # noqa: BLE001 - 输出端故障不能影响任务本身
+            logger.warning("投递输出事件 %s 时出错，已忽略", event.type, exc_info=True)
 
-            if not response.has_tool_calls:
-                self._save_to_history(turn)
-                return response.content or ""
+    async def _on_delta(self, delta: StreamDelta) -> None:
+        """把 provider 的增量翻译成输出事件。
 
-            aborted = await self._run_tool_calls(response, messages, turn)
-            if aborted is not None:
-                return aborted
-
-        # 走到这里说明步数耗尽：历史最后是一条 tool 消息，结构仍然合法，
-        # 补一条 assistant 说明后照常保存。
-        notice = (
-            f"已达到单轮最大步数（{self.max_steps} 步）仍未完成任务，已停止。"
-            "请把需求拆分成更小的步骤后重试。"
-        )
-        self._save_to_history([*turn, {"role": "assistant", "content": notice}])
-        logger.warning("达到 max_steps=%d，强制结束本轮", self.max_steps)
-        return notice
+        一段增量里思考和正文可能同时有（少见但合法），分别发两条：前端是往两个
+        不同的容器里追加的，混在一条里反而要它自己拆。
+        """
+        if delta.reasoning:
+            await self._emit(ThinkingDelta(text=delta.reasoning, step=self._step))
+        if delta.content:
+            await self._emit(ContentDelta(text=delta.content, step=self._step))
 
     async def _run_tool_calls(
         self,
@@ -184,6 +273,17 @@ class AgentLoop:
             # 都必须在历史里有对应的 tool 结果，否则下次请求会被接口以结构非法
             # 拒绝（400）。既然整轮都不执行，就逐个补占位结果，不能直接跳出。
             for pending in response.tool_calls:
+                # 模型确实发起了这些调用，如实广播出去（前端才好显示"以下调用被
+                # 拒绝执行"）；但占位消息是给接口看的结构性补丁、不是真结果，
+                # 所以只发 ToolCallEvent，不发 ToolResultEvent。
+                await self._emit(
+                    ToolCallEvent(
+                        id=pending.id,
+                        name=pending.name,
+                        arguments=pending.arguments,
+                        step=self._step,
+                    )
+                )
                 placeholder = {
                     "role": "tool",
                     "tool_call_id": pending.id,
@@ -209,10 +309,22 @@ class AgentLoop:
             )
 
         for index, tool_call in enumerate(response.tool_calls):
+            # 调用与结果交错发出，而不是"先全发调用、再全发结果"：这样订阅者拿到的
+            # 顺序就是真实时间线，前端不必自己按 id 配对。
+            await self._emit(
+                ToolCallEvent(
+                    id=tool_call.id,
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                    step=self._step,
+                )
+            )
             result = await self.registry.execute(tool_call.name, tool_call.arguments)
             # 提示只挂在整轮的第一个结果上，多个调用重复挂同样的文字只是噪声。
             if index == 0 and hint:
                 result += hint
+
+            await self._emit(_tool_result_event(tool_call, result, self._step))
 
             tool_message = {
                 "role": "tool",
@@ -251,8 +363,10 @@ class AgentLoop:
                 }
                 for tool_call in response.tool_calls
             ]
-            # 一次响应的多个 tool_call 通常共享同一段推理，取第一个非空的即可。
-            reasoning = next(
+            # 优先取响应级的推理：流式下它是一整段、先于 tool_calls 到达，没有
+            # "这段推理属于哪次调用"的归属信息；tool_call 上那份是同内容的副本，
+            # 留给按旧形状取用的实现。取不到再回退到 tool_call 级。
+            reasoning = response.reasoning_content or next(
                 (tc.reasoning_content for tc in response.tool_calls if tc.reasoning_content),
                 None,
             )
@@ -308,3 +422,30 @@ class AgentLoop:
             messages: 本轮新增的 user / assistant / tool 消息，按发生顺序排列。
         """
         self.history.extend(messages)
+
+
+def _tool_result_event(tool_call: ToolCallRequest, result: str, step: int) -> ToolResultEvent:
+    """把工具结果包成事件，超长的截成预览。
+
+    **模型拿到的始终是全文**（进 messages 的是 result 本身），截断只针对订阅者：
+    read_file 读一个几 MB 的文件，原样推到前端会直接把页面打死。这个区分统一在
+    这里做——放到各个 sink 里做等于每个实现都要重写一遍同样的规则，还容易忘。
+    """
+    length = len(result)
+    if length <= TOOL_RESULT_PREVIEW_LIMIT:
+        return ToolResultEvent(
+            id=tool_call.id,
+            name=tool_call.name,
+            result=result,
+            truncated=False,
+            length=length,
+            step=step,
+        )
+    return ToolResultEvent(
+        id=tool_call.id,
+        name=tool_call.name,
+        result=result[:TOOL_RESULT_PREVIEW_LIMIT] + "…",
+        truncated=True,
+        length=length,
+        step=step,
+    )
