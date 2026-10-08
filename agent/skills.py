@@ -56,10 +56,12 @@ SKILL_FILENAME = "SKILL.md"
 _FRONTMATTER_FENCE = re.compile(r"^---[ \t]*\r?$", re.MULTILINE)
 
 #: 摘要的引导语。模型看到这段才会知道：技能正文不在眼前，得自己去读。
+#:
+#: 这里**不再自带 "可用技能：" 这一段标题**：System Prompt 里由 ContextBuilder 统一
+#: 加上 "## 可用技能" 段头，两处都写就会连着出现两行标题。
 _GUIDE = (
     "你有以下技能可用。当你需要使用某项技能时，"
     "请先用 read_file 工具读取对应的 SKILL.md 文件获取详细指南。"
-    "\n\n可用技能："
 )
 
 

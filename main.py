@@ -4,7 +4,8 @@
 
     Config ─▶ OpenAICompatProvider ─┐
            ├─▶ ToolRegistry         ├─▶ AgentLoop ─▶ 交互循环
-           └─▶ ContextBuilder       ─┘   (read_file / write_file / list_dir / exec / web_search / web_fetch)
+           ├─▶ SkillsLoader ─┐      │   (read_file / write_file / list_dir / exec
+           └─▶ ContextBuilder ┘──────┘    / web_search / web_fetch)
 
     python main.py                              # 交互模式，可连续追问
     echo "看看工作区有哪些文件" | python main.py   # 一次性提问
@@ -21,6 +22,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from typing import TextIO
 
@@ -41,6 +43,8 @@ from agent.events import (
     TurnEndEvent,
 )
 from agent.loop import AgentLoop
+from agent.skills import SkillsLoader
+from agent.skills import SkillsLoader
 from agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.shell import ExecTool
@@ -213,6 +217,9 @@ class ConsoleSink(OutputSink):
 def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
     """按配置装配 AgentLoop —— 全项目唯一把各层接起来的地方。
 
+    技能在这里加载而不是在 ContextBuilder 里：技能目录扫一次就够，装载时算好摘要
+    传进去，每轮拼 prompt 直接用现成字符串，不必把磁盘扫描摊到每次对话上。
+
     Args:
         cfg: 运行配置。
         sink: 输出事件的接收方，为 None 时 agent 什么都不往外推（测试方便）。
@@ -236,7 +243,19 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
     )
     for tool in tools:
         registry.register(tool)
-    context = ContextBuilder(workspace=workspace, identity_file=cfg.identity_file)
+
+    # 技能必须在建 ContextBuilder 之前加载好：它的摘要要进 System Prompt。
+    skills = SkillsLoader(os.path.join(workspace, "skills"))
+    skills_summary = skills.build_skills_summary()
+    if skills_summary:
+        # 走 stderr：它和横幅一样属于"程序的界面"，stdout 上只留模型回答。
+        print(f"已加载技能 {len(skills.list_skills())} 个", file=sys.stderr)
+
+    context = ContextBuilder(
+        workspace=workspace,
+        identity_file=cfg.identity_file,
+        skills_summary=skills_summary,
+    )
     return AgentLoop(
         provider, registry, context, max_steps=cfg.max_steps, sink=sink
     )

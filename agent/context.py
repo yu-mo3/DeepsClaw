@@ -7,6 +7,9 @@ agent 循环只调用 build_messages()，不必关心 prompt 长什么样。
 拆成单独一层的好处：人设、时间、工作区、记忆各有各的载体（文件 / 运行时 / 参数），
 要调整格式或加一段新上下文，只改这一个文件。
 
+技能摘要（skills_summary）是个例外：它由调用方用 SkillsLoader 在启动时加载好传进来，
+不在这里读磁盘——技能目录扫一次就够，没必要每轮对话都重扫一遍。
+
 典型用法::
 
     ctx = ContextBuilder(workspace="/path/to/ws")
@@ -16,8 +19,6 @@ agent 循环只调用 build_messages()，不必关心 prompt 长什么样。
 import logging
 import os
 from datetime import datetime
-
-from agent.skills import SkillsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -42,37 +43,34 @@ class ContextBuilder:
     人设          ``{workspace}/{identity_file}``             内置默认人设
     当前时间      运行时 datetime                              必有
     工作区路径    构造参数 workspace                           必有
-    技能目录      ``{workspace}/{skills_dir}/**/SKILL.md``     整段省略
     长期记忆      ``{workspace}/memory/MEMORY.md``            整段省略
+    技能摘要      构造参数 skills_summary（由 SkillsLoader 生成）  整段省略
     ============  ==========================================  ====================
 
-技能只放**目录**（名字 + 一句描述 + 文件路径），正文要模型自己用 read_file 去取，
-理由见 agent.skills 的模块文档。
-
-    两个文件都在每次调用时重新读取，不做缓存：进度都在磁盘上，用户改完 identity.md
-    下一轮就生效，调试 agent 时这个即时性比省下的几次小文件读取值钱得多。
+    前四块在每次调用时重新读取，不做缓存：进度都在磁盘上，用户改完 identity.md
+    下一轮就生效，调试 agent 时这个即时性比省下的几次小文件读取值钱得多。技能摘要
+    则按进程生命周期缓存一次，见模块文档。
     """
 
     def __init__(
         self,
         workspace: str,
         identity_file: str = "identity.md",
-        skills_dir: str = "skills",
+        skills_summary: str = "",
     ) -> None:
         """初始化。
 
         Args:
-            workspace: 工作区根目录，同时用于定位人设、技能和记忆文件，并写进
-                prompt 告诉模型自己在哪个目录干活。
+            workspace: 工作区根目录，同时用于定位人设和记忆文件，并写进 prompt
+                告诉模型自己在哪个目录干活。
             identity_file: 人设文件名，相对 workspace，也可以传绝对路径接管。
-            skills_dir: 技能目录名（如 skills），相对 workspace。目录不存在时
-                技能段整段省略，因此不装技能的项目照常可用。
+            skills_summary: 技能摘要，由 SkillsLoader.build_skills_summary() 生成。
+                为空字符串时 System Prompt 里不出现技能段落，因此不装技能的项目
+                与传参前完全一致。
         """
         self.workspace = os.path.realpath(workspace)
         self.identity_file = identity_file
-        # 技能目录按**工作区相对**形态保存：SkillsLoader 按同样形态拼接路径，
-        # prompt 里给出的 skills/xxx/SKILL.md 才能被 read_file 直接读。
-        self.skills_dir = skills_dir
+        self.skills_summary = skills_summary
 
     def _load_identity(self) -> str:
         """读取人设文件内容，读不到时返回默认人设。
@@ -116,21 +114,13 @@ class ContextBuilder:
             logger.warning("读取记忆文件 %s 失败: %s", path, exc)
             return ""
 
-    def _load_skills(self) -> str:
-        """读取技能目录摘要，没有技能时返回空字符串。
-
-        每轮都重扫目录：技能是用户随手增删的文件，改完下一轮就生效，比省几次
-        listdir 值钱得多（与 identity.md 的处理保持一致）。
-        """
-        loader = SkillsLoader(os.path.join(self.workspace, self.skills_dir))
-        return loader.build_skills_summary()
-
     def build_system_prompt(self) -> str:
         """拼接完整的 System Prompt。
 
-        段落顺序：人设 → 当前时间 → 工作区 → 长期记忆。时间和工作区放在人设之后，
-        是因为它们属于"环境事实"，模型读完角色设定再看环境更顺；记忆放最后，
-        它是可选的长文本，不打断前面固定结构的可读性。
+        段落顺序：人设 → 当前时间 → 工作区 → 长期记忆 → 可用技能。时间和工作区放在
+        人设之后，是因为它们属于"环境事实"，模型读完角色设定再看环境更顺；记忆和技能
+        都是可选的长文本，放最后，不打断前面固定结构的可读性。技能排在最后是因为它
+        属于"额外能力清单"，与前面四块描述"我是谁、在哪、记得什么"的性质不同。
 
         时间是本地时间，不带时区，模型看到的就是用户此刻看到的时间。%A 输出的是
         英文星期（如 Wednesday），因为 Python 默认不设置 LC_TIME。
@@ -142,13 +132,17 @@ class ContextBuilder:
 
         sections.append(f"## 工作区\n{self.workspace}")
 
-        if skills := self._load_skills():
-            sections.append(f"## 技能\n{skills}")
-
         if memory := self._load_memory():
             sections.append(f"## 长期记忆\n{memory}")
 
-        return "\n\n".join(sections)
+        prompt = "\n\n".join(sections)
+
+        # 技能摘要整段追加在末尾：它由调用方一次性加载好，这里只负责摆放位置。
+        # 内容为空时一个字都不加，"没装技能"的项目拿到的 prompt 与从前完全一致。
+        if self.skills_summary:
+            prompt += f"\n\n## 可用技能\n{self.skills_summary}"
+
+        return prompt
 
     def build_messages(
         self,
