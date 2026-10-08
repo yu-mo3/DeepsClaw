@@ -17,6 +17,8 @@ import logging
 import os
 from datetime import datetime
 
+from agent.skills import SkillsLoader
+
 logger = logging.getLogger(__name__)
 
 # identity.md 缺失或为空时使用的兜底人设。宁可给一个通用的"编程助手"，
@@ -32,7 +34,7 @@ DEFAULT_IDENTITY = (
 class ContextBuilder:
     """构造 System Prompt 与完整 messages 列表。
 
-    四块上下文的来源各不相同：
+    五块上下文的来源各不相同：
 
     ============  ==========================================  ====================
     内容          来源                                        取不到时
@@ -40,23 +42,37 @@ class ContextBuilder:
     人设          ``{workspace}/{identity_file}``             内置默认人设
     当前时间      运行时 datetime                              必有
     工作区路径    构造参数 workspace                           必有
+    技能目录      ``{workspace}/{skills_dir}/**/SKILL.md``     整段省略
     长期记忆      ``{workspace}/memory/MEMORY.md``            整段省略
     ============  ==========================================  ====================
+
+技能只放**目录**（名字 + 一句描述 + 文件路径），正文要模型自己用 read_file 去取，
+理由见 agent.skills 的模块文档。
 
     两个文件都在每次调用时重新读取，不做缓存：进度都在磁盘上，用户改完 identity.md
     下一轮就生效，调试 agent 时这个即时性比省下的几次小文件读取值钱得多。
     """
 
-    def __init__(self, workspace: str, identity_file: str = "identity.md") -> None:
+    def __init__(
+        self,
+        workspace: str,
+        identity_file: str = "identity.md",
+        skills_dir: str = "skills",
+    ) -> None:
         """初始化。
 
         Args:
-            workspace: 工作区根目录，同时用于定位人设和记忆文件，并写进 prompt
-                告诉模型自己在哪个目录干活。
+            workspace: 工作区根目录，同时用于定位人设、技能和记忆文件，并写进
+                prompt 告诉模型自己在哪个目录干活。
             identity_file: 人设文件名，相对 workspace，也可以传绝对路径接管。
+            skills_dir: 技能目录名（如 skills），相对 workspace。目录不存在时
+                技能段整段省略，因此不装技能的项目照常可用。
         """
         self.workspace = os.path.realpath(workspace)
         self.identity_file = identity_file
+        # 技能目录按**工作区相对**形态保存：SkillsLoader 按同样形态拼接路径，
+        # prompt 里给出的 skills/xxx/SKILL.md 才能被 read_file 直接读。
+        self.skills_dir = skills_dir
 
     def _load_identity(self) -> str:
         """读取人设文件内容，读不到时返回默认人设。
@@ -100,6 +116,15 @@ class ContextBuilder:
             logger.warning("读取记忆文件 %s 失败: %s", path, exc)
             return ""
 
+    def _load_skills(self) -> str:
+        """读取技能目录摘要，没有技能时返回空字符串。
+
+        每轮都重扫目录：技能是用户随手增删的文件，改完下一轮就生效，比省几次
+        listdir 值钱得多（与 identity.md 的处理保持一致）。
+        """
+        loader = SkillsLoader(os.path.join(self.workspace, self.skills_dir))
+        return loader.build_skills_summary()
+
     def build_system_prompt(self) -> str:
         """拼接完整的 System Prompt。
 
@@ -116,6 +141,9 @@ class ContextBuilder:
         sections.append(f"## 当前时间\n{now}")
 
         sections.append(f"## 工作区\n{self.workspace}")
+
+        if skills := self._load_skills():
+            sections.append(f"## 技能\n{skills}")
 
         if memory := self._load_memory():
             sections.append(f"## 长期记忆\n{memory}")
