@@ -43,7 +43,7 @@ from agent.events import (
     TurnEndEvent,
 )
 from agent.loop import AgentLoop
-from agent.skills import SkillsLoader
+from agent.memory import MemoryConsolidator
 from agent.skills import SkillsLoader
 from agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
 from agent.tools.memory import MemoryTool
@@ -273,6 +273,14 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
     # 与代码分开，迁移工作区时历史跟着走，也不会污染仓库根。
     session_manager = SessionManager(os.path.join(workspace, "workspace", "sessions"))
 
+    # 历史压缩：只有配了 token 预算（AGENT_TOKEN_BUDGET）才开启，否则传 None，
+    # 行为与从前完全一致。摘要用的 provider 就是同一个模型客户端。
+    consolidator = (
+        MemoryConsolidator(provider, workspace, token_budget=cfg.token_budget)
+        if cfg.token_budget
+        else None
+    )
+
     return AgentLoop(
         provider,
         registry,
@@ -281,6 +289,7 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         sink=sink,
         session_manager=session_manager,
         session_key=SESSION_KEY,
+        consolidator=consolidator,
     )
 
 
@@ -299,6 +308,12 @@ def _print_banner(cfg: Config, agent: AgentLoop) -> None:
         + (f"已恢复 {len(agent.history)} 条历史消息" if agent.history else "新会话"),
         file=sys.stderr,
     )
+    # 压缩会改写发给模型的历史，用户应当知道它开着还是关着。
+    if agent.consolidator is not None:
+        print(
+            f"历史压缩：开启（预算约 {agent.consolidator.token_budget} tokens）",
+            file=sys.stderr,
+        )
     print("输入 /help 查看命令，/exit 退出。", file=sys.stderr)
     print("思考与工具调用实时显示（它们走 stderr，stdout 只有回答）。\n", file=sys.stderr)
 

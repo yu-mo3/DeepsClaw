@@ -43,6 +43,7 @@ from enum import Enum
 from typing import Any
 
 from agent.context import ContextBuilder
+from agent.memory import MemoryConsolidator
 from agent.events import (
     REASON_CANCELLED,
     REASON_ERROR,
@@ -115,6 +116,7 @@ class AgentLoop:
         sink: OutputSink | None = None,
         session_manager: SessionManager | None = None,
         session_key: str = "cli:direct",
+        consolidator: MemoryConsolidator | None = None,
     ) -> None:
         """初始化。
 
@@ -133,6 +135,9 @@ class AgentLoop:
             session_manager: 会话持久化器。为 None 时本类退化成纯内存模式（测试
                 与不落盘的嵌入场景用），run() 照常工作，只是不写磁盘。
             session_key: 会话标识，决定读写的 JSONL 文件，如 "cli:direct"。
+            consolidator: 历史压缩器。为 None 时完全不做压缩（默认行为不变）；传入后
+                每步调用模型之前检查历史长度，超预算就把中间那段旧消息摘要成一条 system
+                消息再发出去，见 _compact_for_model。
         """
         self.provider = provider
         self.registry = registry
@@ -141,6 +146,7 @@ class AgentLoop:
         self.max_steps = max_steps
         self.session_manager = session_manager
         self.session_key = session_key
+        self.consolidator = consolidator
         if history is not None:
             self.history: list[dict] = history
         elif session_manager is not None:
@@ -186,7 +192,7 @@ class AgentLoop:
         try:
             for _ in range(self.max_steps):
                 response = await self.provider.chat(
-                    messages,
+                    await self._compact_for_model(messages),
                     tools=self.registry.get_definitions(),
                     model=self.model,
                     on_delta=self._on_delta,
@@ -245,6 +251,39 @@ class AgentLoop:
             # 四个显式出口 + 取消 + 异常两条隐形出口，统一在这里收尾。逐个 return
             # 前手写 emit 一定会漏其中某一条。
             await self._emit(TurnEndEvent(reply=reply, reason=reason))
+
+    async def _compact_for_model(self, messages: list[dict]) -> list[dict]:
+        """送给模型之前的历史压缩（没配压缩器时是空操作）。
+
+        三个必须讲清楚的约束：
+
+        1. **只压缩"发出去的那份"**：`messages` 是循环自己的账本，工具结果要靠它按
+           tool_call_id 配对；就地替换会把账本和真实发生的事搞脱节。压缩结果只影响
+           这一次请求。
+        2. **压缩结果必须以 user（或 summary 后的第一条 user）开头**：压缩后我们仍要
+           往 `messages` 尾部追加新的 assistant/tool 消息，如果开头是 tool 消息，新的
+           assistant 就会接在一条"找不到发起者的工具结果"后面，接口直接 400。
+           MemoryConsolidator 的尾部对齐保证了这一点（尾部起点永远落在 user 或
+           assistant+tool_calls 上）。
+        3. **必须真的变短才采用**：压缩结果不比原来短时（历史本来就没几条旧消息），
+           换一份发出去纯属多此一举，直接沿用原表。注意**不能**反过来要求"不得短于
+           本轮起点条数"——历史越长起点越高，那样等于让压缩永不生效。
+
+        Returns:
+            可以安全发给模型的消息列表；不需要压缩时返回入参本身。
+        """
+        if self.consolidator is None:
+            return messages
+
+        compacted = await self.consolidator.maybe_consolidate(messages)
+        if compacted is messages or len(compacted) >= len(messages):
+            # 没压成、或压完没变短（旧消息本来就只剩几条），就没必要换一份发出去。
+            return messages
+
+        logger.debug(
+            "本次请求使用压缩后的历史：%d 条 -> %d 条", len(messages), len(compacted)
+        )
+        return compacted
 
     async def _emit(self, event: AgentEvent) -> None:
         """把事件推给输出端。
