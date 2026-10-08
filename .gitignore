@@ -224,8 +224,9 @@ data/index/
 data/reports/
 # LangGraph checkpoint（SQLite，会话中断恢复用）
 data/checkpoints/
-# 会话持久化：SessionManager 写入的 JSONL 对话历史（agent 运行数据，不入库）
-workspace/sessions/
+# agent 运行数据目录：会话 JSONL 历史（SessionManager）与长期记忆 MEMORY.md
+# 两者都是本机运行产物，不入库；记忆文件请按需自行备份。
+workspace/
 # 注：data/raw_docs/ 下的手册与仿真数据集是数据资产，正常提交
 
 # ===== 前端构建产物 =====

@@ -5,7 +5,7 @@
     Config ─▶ OpenAICompatProvider ─┐
            ├─▶ ToolRegistry         ├─▶ AgentLoop ─▶ 交互循环
            ├─▶ SkillsLoader ─┐      │   (read_file / write_file / list_dir / exec
-           └─▶ ContextBuilder ┘──────┘    / web_search / web_fetch)
+           └─▶ ContextBuilder ┘──────┘    / web_search / web_fetch / save_memory)
 
     python main.py                              # 交互模式，可连续追问
     echo "看看工作区有哪些文件" | python main.py   # 一次性提问
@@ -46,11 +46,12 @@ from agent.loop import AgentLoop
 from agent.skills import SkillsLoader
 from agent.skills import SkillsLoader
 from agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
+from agent.tools.memory import MemoryTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.shell import ExecTool
 from agent.tools.web_fetch import WebFetchTool
 from agent.tools.web_search import WebSearchTool
-from config import Config
+from config import Config, DATA_MEMORY_FILE
 from providers.openai_compat import OpenAICompatProvider
 from session.manager import SessionManager
 
@@ -248,6 +249,8 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         ExecTool(workspace),
         WebSearchTool(cfg.bocha_api_key),
         WebFetchTool(),
+        # 长期记忆的写入侧：路径只来自配置，模型无法指定写到别处。
+        MemoryTool(str(cfg.memory_file)),
     )
     for tool in tools:
         registry.register(tool)
@@ -263,6 +266,7 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         workspace=workspace,
         identity_file=cfg.identity_file,
         skills_summary=skills_summary,
+        memory_file=str(cfg.memory_file),
     )
 
     # 会话文件放在**工作区**内的 workspace/sessions 下，而不是项目根目录：运行时数据

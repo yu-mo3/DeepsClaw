@@ -22,6 +22,10 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+#: 注入 System Prompt 的记忆文本上限（字符）。记忆是每轮都带的固定开销，
+#: 封顶是为了让一份越攒越大的记忆不至于把上下文挤干。
+MAX_MEMORY_CHARS = 4000
+
 # identity.md 缺失或为空时使用的兜底人设。宁可给一个通用的"编程助手"，
 # 也不要让 System Prompt 缺了这一块——没有角色设定时模型容易过度寒暄或答非所问。
 DEFAULT_IDENTITY = (
@@ -43,7 +47,7 @@ class ContextBuilder:
     人设          ``{workspace}/{identity_file}``             内置默认人设
     当前时间      运行时 datetime                              必有
     工作区路径    构造参数 workspace                           必有
-    长期记忆      ``{workspace}/memory/MEMORY.md``            整段省略
+    长期记忆      构造参数 memory_file（默认在数据目录下）      整段省略
     技能摘要      构造参数 skills_summary（由 SkillsLoader 生成）  整段省略
     ============  ==========================================  ====================
 
@@ -57,6 +61,7 @@ class ContextBuilder:
         workspace: str,
         identity_file: str = "identity.md",
         skills_summary: str = "",
+        memory_file: str = "",
     ) -> None:
         """初始化。
 
@@ -67,10 +72,13 @@ class ContextBuilder:
             skills_summary: 技能摘要，由 SkillsLoader.build_skills_summary() 生成。
                 为空字符串时 System Prompt 里不出现技能段落，因此不装技能的项目
                 与传参前完全一致。
+            memory_file: 长期记忆文件路径。可以是绝对路径，也可以是相对 workspace
+                的路径；为空字符串表示不使用长期记忆（整段省略）。
         """
         self.workspace = os.path.realpath(workspace)
         self.identity_file = identity_file
         self.skills_summary = skills_summary
+        self.memory_file = memory_file
 
     def _load_identity(self) -> str:
         """读取人设文件内容，读不到时返回默认人设。
@@ -99,20 +107,44 @@ class ContextBuilder:
     def _load_memory(self) -> str:
         """读取长期记忆文件，不存在时返回空字符串。
 
-        预留给后续的记忆机制：agent 把跨会话该记住的事写进 memory/MEMORY.md，
-        这里每轮读出来塞进 System Prompt。目前没有写入方，所以通常返回空串，
-        build_system_prompt 会据此整段省略。
+        记忆是**跨会话**的：写它的通常是 save_memory 工具（agent 自己判断"这件事值得
+        记住"），人工直接编辑也完全可以。每轮重新读，因此 agent 刚记下的事下一轮就
+        生效，不需要重启。
+
+        文件不存在是常态（记忆是陆续攒出来的），静默跳过整段；超过上限时截断并保留
+        开头——记忆文件越长，每轮请求的固定开销越大，封顶是为了让它不至于把上下文
+        挤干。
         """
-        path = os.path.join(self.workspace, "memory", "MEMORY.md")
+        if not self.memory_file:
+            return ""
+        path = self._resolve_memory_path()
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read().strip()
         except FileNotFoundError:
-            # 常态，不打扰——记忆文件是陆续积累出来的。
             return ""
         except OSError as exc:
             logger.warning("读取记忆文件 %s 失败: %s", path, exc)
             return ""
+
+        if len(content) > MAX_MEMORY_CHARS:
+            total = len(content)
+            content = (
+                content[:MAX_MEMORY_CHARS]
+                + f"\n\n…[记忆已截断：全文 {total} 字符，以上为前 {MAX_MEMORY_CHARS} 字符，"
+                "可用 read_file 读取完整文件]"
+            )
+        return content
+
+    def _resolve_memory_path(self) -> str:
+        """把 memory_file 解析成绝对路径。
+
+        相对路径按 **workspace** 解析，绝对路径原样使用——这样调用方既可以传
+        ``workspace/memory/MEMORY.md`` 这种项目根相对路径，也可以传工作区相对路径。
+        """
+        if os.path.isabs(self.memory_file):
+            return self.memory_file
+        return os.path.join(self.workspace, self.memory_file)
 
     def build_system_prompt(self) -> str:
         """拼接完整的 System Prompt。
