@@ -230,7 +230,7 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         WriteFileTool(workspace),
         ListDirTool(workspace),
         ExecTool(workspace),
-        WebSearchTool(),
+        WebSearchTool(cfg.bocha_api_key),
     )
     for tool in tools:
         registry.register(tool)

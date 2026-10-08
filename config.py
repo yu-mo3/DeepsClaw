@@ -73,6 +73,8 @@ class Config:
         model: 默认模型名。
         workspace: agent 的工作区根目录，文件工具只能在这个范围内读写。
         identity_file: 人设文件名，相对 workspace。
+        bocha_api_key: 博查搜索 API key，供联网搜索工具使用；为空则联网搜索不可用，
+            但不影响 agent 启动。
         max_steps: 单轮对话最多调用模型的次数，防止任务不收敛时无限跑。
         timeout: 单次模型请求超时（秒）。
         extra_body: 透传给接口的额外请求体，如 DeepSeek 思考模式开关。
@@ -84,6 +86,7 @@ class Config:
     model: str
     workspace: Path
     identity_file: str
+    bocha_api_key: str | None
     max_steps: int
     timeout: float
     extra_body: dict | None
@@ -91,10 +94,11 @@ class Config:
 
     def __repr__(self) -> str:
         """打印配置时遮住密钥，避免它随日志或报错信息泄漏出去。"""
-        masked = f"{self.api_key[:6]}…" if len(self.api_key) > 12 else "***"
         return (
-            f"Config(api_key={masked!r}, base_url={self.base_url!r}, model={self.model!r}, "
-            f"workspace={str(self.workspace)!r}, identity_file={self.identity_file!r}, "
+            f"Config(api_key={_mask(self.api_key)!r}, base_url={self.base_url!r}, "
+            f"model={self.model!r}, workspace={str(self.workspace)!r}, "
+            f"identity_file={self.identity_file!r}, "
+            f"bocha_api_key={_mask(self.bocha_api_key)!r}, "
             f"max_steps={self.max_steps}, timeout={self.timeout}, "
             f"extra_body={self.extra_body!r}, log_level={self.log_level!r})"
         )
@@ -130,11 +134,23 @@ class Config:
             model=_get("LLM_MODEL", "DEEPSEEK_MODEL") or DEFAULT_MODEL,
             workspace=_resolve_path(_get("AGENT_WORKSPACE") or "."),
             identity_file=_get("AGENT_IDENTITY_FILE") or "identity.md",
+            bocha_api_key=_get("BOCHA_API_KEY"),
             max_steps=_get_int("AGENT_MAX_STEPS", 50, minimum=1),
             timeout=_get_float("LLM_TIMEOUT", 120.0, minimum=0.1),
             extra_body=_get_json("LLM_EXTRA_BODY"),
             log_level=_get_log_level(),
         )
+
+
+def _mask(secret: str | None) -> str:
+    """把密钥裁成可安全打印的形式，未配置时返回固定文案。
+
+    配置对象会被 debug 日志和报错信息带出去，密钥必须在这里就被遮住，
+    而不是指望调用方记得别打。
+    """
+    if not secret:
+        return "(未配置)"
+    return f"{secret[:6]}…" if len(secret) > 12 else "***"
 
 
 def _get_log_level() -> str:
