@@ -1,4 +1,4 @@
-"""dshclaw 命令行入口。
+"""DeepsClaw 命令行入口。
 
 把配置、模型客户端、工具和 agent 循环接成一个能对话的进程：
 
@@ -55,7 +55,7 @@ from config import Config, DATA_MEMORY_FILE
 from providers.openai_compat import OpenAICompatProvider
 from session.manager import SessionManager
 
-logger = logging.getLogger("dshclaw")
+logger = logging.getLogger("DeepsClaw")
 
 #: 交互模式的输入提示符
 PROMPT = "你 > "
@@ -290,7 +290,7 @@ def _print_banner(cfg: Config, agent: AgentLoop) -> None:
     走 stderr：它和提示符、命令回显一样都是"程序的界面"，不是模型说的话。
     stdout 上只留模型回答，``python main.py > answer.txt`` 拿到的才是干净的。
     """
-    print(f"dshclaw · 模型 {cfg.model} · 工作区 {cfg.workspace}", file=sys.stderr)
+    print(f"DeepsClaw · 模型 {cfg.model} · 工作区 {cfg.workspace}", file=sys.stderr)
     print(f"可用工具：{'、'.join(agent.registry.list_tools())}", file=sys.stderr)
     # 会话是持久的：把身份和恢复到的历史条数一起说出来，用户才知道
     # "这是接着上次聊"还是"开了一个新会话"。

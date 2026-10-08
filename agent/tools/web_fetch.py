@@ -64,7 +64,7 @@ MAX_CONTENT_CHARS = 12000
 MAX_REDIRECTS = 5
 
 #: 抓取时使用的 UA。带上标识是基本礼貌，也让对方在日志里认得出这是谁。
-USER_AGENT = "dshclaw/1.0 (+https://github.com/; web_fetch tool)"
+USER_AGENT = "DeepsClaw/1.0 (+https://github.com/yu-mo3/DeepsClaw; web_fetch tool)"
 
 #: 声明的可接受类型：网页优先，纯文本兜底，其余一律按 '*/*' 让服务端照常回，
 #: 由 Content-Type 检查负责拒绝二进制（这里写死 pdf/image 反而会让个别站点直接 406）。

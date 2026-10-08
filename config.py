@@ -64,7 +64,7 @@ def _resolve_path(raw: str) -> Path:
     """把配置里的路径解析成绝对路径。
 
     相对路径以**项目根目录**为基准而不是当前工作目录——否则从别的目录执行
-    ``python dshclaw/main.py``，workspace 会静默变成那个目录，工具沙箱的范围
+    ``python DeepsClaw/main.py``，workspace 会静默变成那个目录，工具沙箱的范围
     跟着变，行为看起来就像随机。
     """
     path = Path(raw).expanduser()
