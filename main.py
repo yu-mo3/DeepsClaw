@@ -4,7 +4,7 @@
 
     Config ─▶ OpenAICompatProvider ─┐
            ├─▶ ToolRegistry         ├─▶ AgentLoop ─▶ 交互循环
-           └─▶ ContextBuilder       ─┘   (read_file / write_file / list_dir / exec / web_search)
+           └─▶ ContextBuilder       ─┘   (read_file / write_file / list_dir / exec / web_search / web_fetch)
 
     python main.py                              # 交互模式，可连续追问
     echo "看看工作区有哪些文件" | python main.py   # 一次性提问
@@ -44,6 +44,7 @@ from agent.loop import AgentLoop
 from agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.shell import ExecTool
+from agent.tools.web_fetch import WebFetchTool
 from agent.tools.web_search import WebSearchTool
 from config import Config
 from providers.openai_compat import OpenAICompatProvider
@@ -231,6 +232,7 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         ListDirTool(workspace),
         ExecTool(workspace),
         WebSearchTool(cfg.bocha_api_key),
+        WebFetchTool(),
     )
     for tool in tools:
         registry.register(tool)
