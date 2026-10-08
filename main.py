@@ -52,19 +52,27 @@ from agent.tools.web_fetch import WebFetchTool
 from agent.tools.web_search import WebSearchTool
 from config import Config
 from providers.openai_compat import OpenAICompatProvider
+from session.manager import SessionManager
 
 logger = logging.getLogger("dshclaw")
 
 #: 交互模式的输入提示符
 PROMPT = "你 > "
 
+#: 交互模式固定使用的会话标识。将来接多个渠道时，这里换成 "渠道:用户" 即可，
+#: 会话文件也会随之分开。
+SESSION_KEY = "cli:direct"
+
 HELP_TEXT = """\
 本地命令（以 / 开头，不会发给模型）：
   /help    显示这份帮助
-  /reset   清空会话历史，从头开始
+  /clear   清空会话历史（同时删除磁盘上的会话文件）
+  /reset   同 /clear
   /exit    退出（等同于 /quit）
 
-其他任何输入都会作为问题发给模型。"""
+其他任何输入都会作为问题发给模型。
+
+会话会自动持久化：下次启动同一个会话时，历史会自动恢复。"""
 
 
 def _setup_console() -> None:
@@ -256,8 +264,19 @@ def _build_agent(cfg: Config, sink: OutputSink | None = None) -> AgentLoop:
         identity_file=cfg.identity_file,
         skills_summary=skills_summary,
     )
+
+    # 会话文件放在**工作区**内的 workspace/sessions 下，而不是项目根目录：运行时数据
+    # 与代码分开，迁移工作区时历史跟着走，也不会污染仓库根。
+    session_manager = SessionManager(os.path.join(workspace, "workspace", "sessions"))
+
     return AgentLoop(
-        provider, registry, context, max_steps=cfg.max_steps, sink=sink
+        provider,
+        registry,
+        context,
+        max_steps=cfg.max_steps,
+        sink=sink,
+        session_manager=session_manager,
+        session_key=SESSION_KEY,
     )
 
 
@@ -269,6 +288,13 @@ def _print_banner(cfg: Config, agent: AgentLoop) -> None:
     """
     print(f"dshclaw · 模型 {cfg.model} · 工作区 {cfg.workspace}", file=sys.stderr)
     print(f"可用工具：{'、'.join(agent.registry.list_tools())}", file=sys.stderr)
+    # 会话是持久的：把身份和恢复到的历史条数一起说出来，用户才知道
+    # "这是接着上次聊"还是"开了一个新会话"。
+    print(
+        f"会话 {agent.session_key}："
+        + (f"已恢复 {len(agent.history)} 条历史消息" if agent.history else "新会话"),
+        file=sys.stderr,
+    )
     print("输入 /help 查看命令，/exit 退出。", file=sys.stderr)
     print("思考与工具调用实时显示（它们走 stderr，stdout 只有回答）。\n", file=sys.stderr)
 
@@ -365,9 +391,10 @@ def _repl(loop: asyncio.AbstractEventLoop, agent: AgentLoop) -> int:
                 return 0
             if command == "/help":
                 print(HELP_TEXT, file=sys.stderr)
-            elif command == "/reset":
-                agent.history.clear()
-                print("会话历史已清空。", file=sys.stderr)
+            elif command in ("/clear", "/reset"):
+                # 内存与磁盘一起清：只清内存的话，重启后刚删掉的对话又会出现。
+                agent.clear_history()
+                print(f"会话历史已清空（含会话文件 {agent.session_key}）。", file=sys.stderr)
             else:
                 print(f"未知命令 {command}，输入 /help 查看可用命令。", file=sys.stderr)
             print(file=sys.stderr)

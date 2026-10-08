@@ -61,6 +61,7 @@ from agent.events import (
 )
 from agent.tools.registry import ToolRegistry
 from providers.base import LLMProvider, LLMResponse, StreamDelta, ToolCallRequest
+from session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,8 @@ class AgentLoop:
         max_steps: int = 50,
         history: list[dict] | None = None,
         sink: OutputSink | None = None,
+        session_manager: SessionManager | None = None,
+        session_key: str = "cli:direct",
     ) -> None:
         """初始化。
 
@@ -122,17 +125,32 @@ class AgentLoop:
             model: 指定模型名，为 None 时用 provider 的默认模型。
             max_steps: 单轮 run() 内最多调用多少次模型，防止任务不收敛时无限跑。
                 每次工具调用后都要再问一次模型，所以它约等于"最多几轮工具"。
-            history: 已有的会话历史，用于恢复会话。**按引用持有**，调用方
-                可以直接把 loop.history 落盘做持久化。
+            history: 已有的会话历史，用于恢复会话。**按引用持有**。显式传了它就
+                以它为准（同一进程内换会话用）；为 None 时改从 session_manager 恢复，
+                两者都没有则从空历史开始。
             sink: 输出事件的接收方，为 None 时用 NullSink（什么都不做）。CLI 传
                 打印到终端的 sink，接前端时传推 WebSocket 的 sink，本类不关心区别。
+            session_manager: 会话持久化器。为 None 时本类退化成纯内存模式（测试
+                与不落盘的嵌入场景用），run() 照常工作，只是不写磁盘。
+            session_key: 会话标识，决定读写的 JSONL 文件，如 "cli:direct"。
         """
         self.provider = provider
         self.registry = registry
         self.context = context
         self.model = model
         self.max_steps = max_steps
-        self.history: list[dict] = history if history is not None else []
+        self.session_manager = session_manager
+        self.session_key = session_key
+        if history is not None:
+            self.history: list[dict] = history
+        elif session_manager is not None:
+            self.history = _repair_history(session_manager.get_history(session_key))
+            if self.history:
+                logger.info(
+                    "从会话 %s 恢复了 %d 条历史消息", session_key, len(self.history)
+                )
+        else:
+            self.history = []
         self._sink: OutputSink = sink or NullSink()
         # 本轮是第几次模型调用，打给事件的 step 字段用——前端按它分块，否则同一个
         # turn 里多段思考会糊成一团、多轮回答会粘成同一个气泡。
@@ -161,7 +179,7 @@ class AgentLoop:
         messages = self.context.build_messages(self.history, user_input)
         turn: list[dict] = []
         if user_input:
-            turn.append({"role": "user", "content": user_input})
+            await self._remember(turn, {"role": "user", "content": user_input})
 
         reply = ""
         reason = REASON_FINISHED
@@ -184,7 +202,7 @@ class AgentLoop:
 
                 assistant_message = self._build_assistant_message(response)
                 messages.append(assistant_message)
-                turn.append(assistant_message)
+                await self._remember(turn, assistant_message)
 
                 if not response.has_tool_calls:
                     self._save_to_history(turn)
@@ -206,7 +224,9 @@ class AgentLoop:
                 f"已达到单轮最大步数（{self.max_steps} 步）仍未完成任务，已停止。"
                 "请把需求拆分成更小的步骤后重试。"
             )
-            self._save_to_history([*turn, {"role": "assistant", "content": notice}])
+            turn.append({"role": "assistant", "content": notice})
+            self._persist(turn[-1])
+            self._save_to_history(turn)
             logger.warning("达到 max_steps=%d，强制结束本轮", self.max_steps)
             reason = REASON_MAX_STEPS
             reply = notice
@@ -290,7 +310,7 @@ class AgentLoop:
                     "content": "[未执行] 本次调用因检测到重复循环被中止。",
                 }
                 messages.append(placeholder)
-                turn.append(placeholder)
+                await self._remember(turn, placeholder)
 
             notice = (
                 f"⚠️ 检测到工具调用陷入循环：{label} 这组调用已原样重复了 {repeats} 轮，"
@@ -332,7 +352,7 @@ class AgentLoop:
                 "content": result,
             }
             messages.append(tool_message)
-            turn.append(tool_message)
+            await self._remember(turn, tool_message)
 
         return None
 
@@ -415,6 +435,38 @@ class AgentLoop:
             return LoopCheck.WARN, repeats, label
         return LoopCheck.OK, repeats, label
 
+    def _persist(self, message: dict) -> None:
+        """把一条消息写进会话文件（没配 session_manager 时是空操作）。"""
+        if self.session_manager is not None:
+            self.session_manager.save_message(self.session_key, message)
+
+    async def _remember(self, turn: list[dict], message: dict) -> None:
+        """把一条新消息同时记进本轮 turn 与会话文件。
+
+        三处消息（用户输入、assistant 回复、工具结果）统一走这一个入口，是为了让
+        "内存里有的，磁盘上也有"这件事只有一个实现点——散在四五个 append 后面各写
+        一次 save_message，迟早会漏掉其中一处，而漏掉的后果是重启后历史错位。
+
+        两个列表的用途不同：turn 在本轮结束时整批进 history（熔断/出错时不进），
+        会话文件则从第一条起就落盘。
+
+        Args:
+            turn: 本轮新增的消息列表，就地追加。
+            message: 要记录的消息。
+        """
+        turn.append(message)
+        self._persist(message)
+
+    def clear_history(self) -> None:
+        """清空会话历史：内存与磁盘一起清。
+
+        只清内存会让用户在重启后又看到刚删掉的对话，只清磁盘则当前进程还在用旧的
+        上下文——两处都清，行为才和用户按下这个命令时的预期一致。
+        """
+        self.history.clear()
+        if self.session_manager is not None:
+            self.session_manager.clear(self.session_key)
+
     def _save_to_history(self, messages: list[dict]) -> None:
         """把本轮新增的消息追加进会话历史。
 
@@ -422,6 +474,41 @@ class AgentLoop:
             messages: 本轮新增的 user / assistant / tool 消息，按发生顺序排列。
         """
         self.history.extend(messages)
+
+
+def _repair_history(history: list[dict]) -> list[dict]:
+    """丢弃历史末尾"有 tool_calls 却没有对应结果"的残段。
+
+    会话文件是边跑边追加的，进程可能死在"assistant 已经发出 tool_calls、工具结果还没
+    写上"的那一刻（Ctrl+C、断电、崩溃）。这段残缺历史一旦原样回传，接口会以结构非法
+    直接返 400，而且这个会话从此再也打不开——比丢一轮对话严重得多。
+
+    修法是丢弃末尾这组未完成的调用；前面的历史都是成对完整的，保留下来。历史上会出现
+    这种情况的唯一入口就是崩溃，因此"从末尾往前丢"足够用，不需要做全量校验。
+
+    Args:
+        history: 从会话文件读回的消息列表。
+
+    Returns:
+        可安全回传给接口的列表；无需修复时原样返回。
+    """
+    # 结果按 tool_call_id 索引，且只在整组齐全时才算完成——半途而废的组同样要丢。
+    results: dict[str, dict] = {
+        m["tool_call_id"]: m for m in history if m.get("tool_call_id")
+    }
+    for index in range(len(history) - 1, -1, -1):
+        message = history[index]
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            continue
+        expected = [call.get("id") for call in message["tool_calls"]]
+        if all(call_id in results for call_id in expected):
+            continue
+        logger.warning(
+            "会话历史末尾有 %d 次未完成的工具调用，已丢弃该残段（进程很可能被中断过）",
+            len(expected),
+        )
+        return history[:index]
+    return history
 
 
 def _tool_result_event(tool_call: ToolCallRequest, result: str, step: int) -> ToolResultEvent:
