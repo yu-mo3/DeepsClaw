@@ -87,6 +87,9 @@ class Config:
             摘要成一条 system 消息，只保留 System Prompt 与最近的对话。为 None 表示关闭。
         bocha_api_key: 博查搜索 API key，供联网搜索工具使用；为空则联网搜索不可用，
             但不影响 agent 启动。
+        qq_app_id: QQ 官方机器人的 AppID。与 qq_app_secret 一起为空时**不启用 QQ 渠道**，
+            程序只跑 CLI；这也是没装 qq-botpy 的人不受影响的原因（渠道是懒加载的）。
+        qq_app_secret: QQ 官方机器人的 AppSecret。属于密钥，只在本进程内使用，不进日志。
         max_steps: 单轮对话最多调用模型的次数，防止任务不收敛时无限跑。
         timeout: 单次模型请求超时（秒）。
         extra_body: 透传给接口的额外请求体，如 DeepSeek 思考模式开关。
@@ -101,6 +104,8 @@ class Config:
     memory_file: Path
     token_budget: int | None
     bocha_api_key: str | None
+    qq_app_id: str | None
+    qq_app_secret: str | None
     max_steps: int
     timeout: float
     extra_body: dict | None
@@ -114,6 +119,7 @@ class Config:
             f"identity_file={self.identity_file!r}, memory_file={str(self.memory_file)!r}, "
             f"token_budget={self.token_budget!r}, "
             f"bocha_api_key={_mask(self.bocha_api_key)!r}, "
+            f"qq_app_id={self.qq_app_id!r}, qq_app_secret={_mask(self.qq_app_secret)!r}, "
             f"max_steps={self.max_steps}, timeout={self.timeout}, "
             f"extra_body={self.extra_body!r}, log_level={self.log_level!r})"
         )
@@ -156,6 +162,10 @@ class Config:
             # 属于"改变行为"的功能，交给用户显式开启（如 AGENT_TOKEN_BUDGET=8000）。
             token_budget=_get_int("AGENT_TOKEN_BUDGET", 0, minimum=0) or None,
             bocha_api_key=_get("BOCHA_API_KEY"),
+            # QQ 渠道是可选功能：两个值都配了才启用。只配一半属于笔误，起不来但又不
+            # 报错最难查，所以这里对"配了一半"明确告警，然后按未启用处理。
+            qq_app_id=_get("QQ_APP_ID"),
+            qq_app_secret=_get("QQ_APP_SECRET"),
             max_steps=_get_int("AGENT_MAX_STEPS", 50, minimum=1),
             timeout=_get_float("LLM_TIMEOUT", 120.0, minimum=0.1),
             extra_body=_get_json("LLM_EXTRA_BODY"),
