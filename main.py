@@ -471,7 +471,9 @@ def _print_banner(cfg: Config, registry: ToolRegistry, width: int | None = None)
     line("模型", cfg.model)
     line("工作区", fit(str(cfg.workspace), inner - 6))
     # 配置来源：用户说"我明明配了"时，第一眼要看的就是这个——到底是哪个文件在生效。
-    line("配置", fit(str(cfg.config_file), inner - 6) if cfg.config_file else "仅 .env / 环境变量")
+    # 没有配置文件时给一句明确的提示（而不是留空）：用户最常问的就是"我配的到底生效没有"。
+    line("配置", fit(str(cfg.config_file), inner - 6) if cfg.config_file
+         else "未使用 config.json（仅环境变量 / .env）")
     # 模型别名表：只在配了 main/subagent 之外的别名时才显示（有别名就意味着
     # spawn_subagent 可以按名挑模型，这是用户自己配的、不看一眼想不到的能力）。
     extra_aliases = {
