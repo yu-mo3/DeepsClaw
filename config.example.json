@@ -1,0 +1,64 @@
+{
+  "$comment": "把这行注释删掉再改；所有字段都可省略，省了就取内置默认值。",
+  "api_key": "sk-你的密钥",
+  "base_url": "https://api.deepseek.com/v1",
+  "models": {
+    "main": "deepseek-chat",
+    "subagent": "qwen3.8-flash",
+    "cheap": "deepseek-chat"
+  },
+  "workspace": ".",
+  "identity_file": "identity.md",
+  "max_iterations": 50,
+  "timeout": 120,
+  "log_level": "INFO",
+  "extra_body": {
+    "thinking": {
+      "type": "enabled"
+    }
+  },
+  "memory": {
+    "file": "workspace/memory/MEMORY.md",
+    "token_budget": 24000
+  },
+  "tools": {
+    "bocha_api_key": ""
+  },
+  "subagent": {
+    "api_key": "",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  },
+  "channels": {
+    "qq": {
+      "app_id": "",
+      "app_secret": ""
+    },
+    "feishu": {
+      "app_id": "",
+      "app_secret": ""
+    },
+    "web": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 8080
+    }
+  },
+  "mcp_servers": {
+    "poetry": {
+      "command": "python",
+      "args": [
+        "mcp_servers/poetry_server.py"
+      ],
+      "description": "古诗词查询（本地示例）"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "./"
+      ],
+      "description": "文件系统（社区 Server）"
+    }
+  }
+}

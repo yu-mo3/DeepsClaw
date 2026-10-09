@@ -147,6 +147,10 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
+# DeepsClaw 主配置：里面通常含模型密钥、渠道密钥，不进版本库。
+# 模板是仓库里的 config.example.json（不含密钥），要改配置就照它复制一份。
+config.json
+
 # Environments
 .env
 .envrc
