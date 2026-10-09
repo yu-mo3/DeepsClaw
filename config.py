@@ -41,6 +41,12 @@ DATA_MEMORY_FILE = f"{DATA_DIR}/memory/MEMORY.md"
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-chat"
 
+#: 子智能体（spawn_subagent）默认走阿里云百炼。它天然是另一个服务商，所以有自己的
+#: 三个配置项，不与主模型共用——"主模型用谁"和"子任务用谁"是两件事，混在一起就没法
+#: 单独把子任务换到更便宜的模型上。百炼同样提供 OpenAI 兼容接口，协议不用改。
+DEFAULT_SUBAGENT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_SUBAGENT_MODEL = "qwen3.8-flash"
+
 _ENV_FILE = PROJECT_ROOT / ".env"
 
 #: 提示用的常用日志级别，按严重程度递减
@@ -90,6 +96,11 @@ class Config:
         qq_app_id: QQ 官方机器人的 AppID。与 qq_app_secret 一起为空时**不启用 QQ 渠道**，
             程序只跑 CLI；这也是没装 qq-botpy 的人不受影响的原因（渠道是懒加载的）。
         qq_app_secret: QQ 官方机器人的 AppSecret。属于密钥，只在本进程内使用，不进日志。
+        subagent_api_key: 子智能体（spawn_subagent 派生的临时 agent）用的密钥，默认接
+            阿里云百炼。**为空则不注册 spawn_subagent 工具**——主 agent 少了这个能力，
+            其余一切照常，不需要它的人不必配。
+        subagent_base_url: 子智能体的接口地址，默认百炼的 OpenAI 兼容入口。
+        subagent_model: 子智能体默认模型名。spawn_subagent 的 model 参数可以按次覆盖它。
         max_steps: 单轮对话最多调用模型的次数，防止任务不收敛时无限跑。
         timeout: 单次模型请求超时（秒）。
         extra_body: 透传给接口的额外请求体，如 DeepSeek 思考模式开关。
@@ -106,6 +117,9 @@ class Config:
     bocha_api_key: str | None
     qq_app_id: str | None
     qq_app_secret: str | None
+    subagent_api_key: str | None
+    subagent_base_url: str
+    subagent_model: str
     max_steps: int
     timeout: float
     extra_body: dict | None
@@ -120,6 +134,9 @@ class Config:
             f"token_budget={self.token_budget!r}, "
             f"bocha_api_key={_mask(self.bocha_api_key)!r}, "
             f"qq_app_id={self.qq_app_id!r}, qq_app_secret={_mask(self.qq_app_secret)!r}, "
+            f"subagent_api_key={_mask(self.subagent_api_key)!r}, "
+            f"subagent_base_url={self.subagent_base_url!r}, "
+            f"subagent_model={self.subagent_model!r}, "
             f"max_steps={self.max_steps}, timeout={self.timeout}, "
             f"extra_body={self.extra_body!r}, log_level={self.log_level!r})"
         )
@@ -166,6 +183,11 @@ class Config:
             # 报错最难查，所以这里对"配了一半"明确告警，然后按未启用处理。
             qq_app_id=_get("QQ_APP_ID"),
             qq_app_secret=_get("QQ_APP_SECRET"),
+            # 子智能体：密钥缺失时功能整体关闭（见 SUBAGENT_TOOL 的装配判断），
+            # 地址与模型名给了默认值，所以只要填一个 key 就能用。
+            subagent_api_key=_get("SUBAGENT_API_KEY"),
+            subagent_base_url=_get("SUBAGENT_BASE_URL") or DEFAULT_SUBAGENT_BASE_URL,
+            subagent_model=_get("SUBAGENT_MODEL") or DEFAULT_SUBAGENT_MODEL,
             max_steps=_get_int("AGENT_MAX_STEPS", 50, minimum=1),
             timeout=_get_float("LLM_TIMEOUT", 120.0, minimum=0.1),
             extra_body=_get_json("LLM_EXTRA_BODY"),

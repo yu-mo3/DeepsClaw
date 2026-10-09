@@ -20,7 +20,7 @@
 """
 
 import logging
-from typing import Any
+from typing import Any, Iterator
 
 from agent.tools.base import Tool
 
@@ -61,6 +61,18 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError(f"工具名重复: {tool.name!r} 已注册，请检查 name 是否唯一")
         self._tools[tool.name] = tool
+
+    def iter_tools(self) -> Iterator[Tool]:
+        """遍历已注册的工具实例。
+
+        与 list_tools() 的区别是它给的是**对象**而不是名字。需要它的场景是"把工具
+        复制到另一个注册表"——spawn_subagent 给子 agent 装配工具集时就得这么做。少了
+        这个方法，调用方只能去读私有的 _tools，那是把内部结构当成契约。
+
+        返回迭代器而不是列表：调用方多为"筛一遍再注册"，迭代器能一路过、不必先物化
+        一份中间列表。注册表在启动阶段一次性建好后只读，因此遍历期间不会被改动。
+        """
+        return iter(self._tools.values())
 
     def get_definitions(self) -> list[dict[str, Any]]:
         """导出所有工具的 function calling 定义。

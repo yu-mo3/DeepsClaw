@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import sys
+from typing import TextIO
 
 from agent.context import ContextBuilder
 from agent.events import (

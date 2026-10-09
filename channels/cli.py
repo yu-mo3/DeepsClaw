@@ -33,16 +33,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import sys
 from typing import Callable, TextIO
 
-from bus.queue import InboundMessage, OutboundMessage
+from bus.queue import InboundMessage, MessageBus, OutboundMessage
 from channels.base import Channel
 
 logger = logging.getLogger(__name__)
 
-#: 输入提示符。与 main.py 用同一个写法，切到多渠道时也是同一套观感。
+#: 用户输入提示符。与 REPLY_PREFIX 一样，选"人/机器"两个不同的前缀，是为了让长对话里
+#: 一眼就能分清哪句是谁说的——纯靠颜色区分在日志、重定向、截图里都会失效。
 PROMPT = "你 > "
+
+#: 助手回复的前缀。回复走 stdout（与界面分流），前缀固定加在这里。
+#:
+#: 刻意**不带 ANSI 颜色**：stdout 会被用户重定向成文件（python main.py > answer.txt），
+#: 那时前缀里混进转义码既难看又碍事。区分靠"前缀本身就是个明确标记"就够了。
+REPLY_PREFIX = "AI > "
 
 #: 退出并让进程返回 0 的命令。带上 /quit 是因为打字习惯因人而异，多认一个不费事。
 EXIT_COMMANDS = ("/exit", "/quit")
@@ -59,9 +67,14 @@ HELP_TEXT = """\
   /clear   清空会话历史（同时删除磁盘上的会话文件）
   /reset   同 /clear
   /tools   列出已装配的工具
-  /exit    退出（等同于 /quit）
+  /exit    退出程序（等同于 /quit，Ctrl+C 同效）
 
-其他任何输入都会作为问题发给模型，等回复打印完才会再次出现提示符。"""
+其他任何输入都会作为问题发给模型，等回复打印完才会再次出现提示符。
+
+屏幕上几种输出的区别：
+  你 >     你输入的问题
+  AI >     模型给你的回答（stdout，重定向到文件拿到的就是这些）
+  灰色内容  思考过程、工具调用、错误提示，都是过程信息，不属于回答"""
 
 HELP_COMMANDS = ("/help", "/h")
 
@@ -125,6 +138,26 @@ class CLIChannel(Channel):
         #: 它才能从"等回复"里醒过来（见 stop）。
         self._stopping = False
 
+        #: 启动横幅文本，由装配处注入（main.py 的 _print_banner 生成）。
+        #:
+        #: 为什么由渠道来打、而不是入口打：**横幅要等到渠道真正就绪时再出现**。早打的
+        #: 话，后面各渠道启动时刷出的日志会紧跟在提示符后面（"你 > 10:42:20 [INFO] QQ
+        #: 渠道启动中…"），看起来像提示符被日志吃掉了，用户根本不知道现在能不能输入。
+        #: 放在这里，横幅与第一个提示符之间不会插进任何别的输出。
+        self._banner: str = ""
+
+    @property
+    def terminal_width(self) -> int:
+        """终端宽度（列）。非终端（重定向、管道）时给 72 列的兜底值。
+
+        暴露出来是给装配处生成横幅用的：横幅在渠道这里打印，宽度也该由渠道说了算，
+        否则生成横幅时探测到的只是那根管道（见 main._print_banner 的说明）。
+        """
+        try:
+            return shutil.get_terminal_size((72, 24)).columns
+        except Exception:  # noqa: BLE001 - 探测失败不该影响启动
+            return 72
+
     @property
     def waiting_for_reply(self) -> bool:
         """是否正卡在"等回复"上。
@@ -148,6 +181,10 @@ class CLIChannel(Channel):
             退出码：0 正常退出（/exit、/quit、Ctrl+D）。返回值与 main.py 的约定一致，
             装配处可以直接拿它当进程退出码。
         """
+        # 就绪了才亮出横幅和提示符，见 _banner 的说明。
+        if self._banner:
+            print(self._banner, file=self._err, flush=True)
+
         while not self._stopping:
             try:
                 text = (await asyncio.to_thread(self._read_line, PROMPT)).strip()
@@ -190,7 +227,7 @@ class CLIChannel(Channel):
         Args:
             message: 要显示的回复。
         """
-        print(f"🤖 {message.content}", file=self._out, flush=True)
+        print(f"{REPLY_PREFIX}{message.content}", file=self._out, flush=True)
         self._response_event.set()
 
     async def stop(self) -> None:
