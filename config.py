@@ -215,7 +215,7 @@ def _get_log_level() -> str:
     """
     raw = _get("LOG_LEVEL")
     if raw is None:
-        return "INFO"
+        return "DEBUG"
     level = raw.upper()
     if level not in logging.getLevelNamesMapping():
         print(
