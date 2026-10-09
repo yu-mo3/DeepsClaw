@@ -56,6 +56,7 @@ from agent.loop import AgentLoop
 from agent.memory import MemoryConsolidator
 from agent.skills import SkillsLoader
 from agent.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool
+from agent.tools.mcp import MCPClientManager
 from agent.tools.memory import MemoryTool
 from agent.tools.registry import ToolRegistry
 from agent.tools.shell import ExecTool
@@ -65,7 +66,7 @@ from agent.tools.web_search import WebSearchTool
 from bus.queue import MessageBus
 from channels.base import Channel
 from channels.cli import CLIChannel
-from config import Config, DATA_MEMORY_FILE
+from config import DATA_MEMORY_FILE, Config, ConfigError
 from gateway import Gateway
 from providers.openai_compat import OpenAICompatProvider
 from session.manager import SessionManager
@@ -251,6 +252,10 @@ def _build_session_manager(cfg: Config) -> SessionManager:
 def _build_subagent_provider(cfg: Config, model: str | None) -> OpenAICompatProvider:
     """造一个子智能体用的 Provider（默认走阿里云百炼）。
 
+    传进来的 model 可能是**别名**（config.json 的 models 段里配的 "cheap" 之类），
+    先经 cfg.resolve_model 翻成真实模型名——模型自己记不住厂商那串模型 ID，
+    让人在配置里给它起短名，才能指望它主动挑"便宜的那个"。
+
     每次派生都新建一个**独立实例**，而不是复用主 agent 那个：子任务的模型与服务商都
     可以和主对话不同（本项目的默认装配就是如此），密钥与 base_url 也跟着不同，共用一份
     连接池只会把两套凭据搅在一起。子 agent 跑完就关，不长期占着连接。
@@ -268,12 +273,12 @@ def _build_subagent_provider(cfg: Config, model: str | None) -> OpenAICompatProv
     return OpenAICompatProvider(
         api_key=cfg.subagent_api_key or "",
         base_url=cfg.subagent_base_url,
-        model=model or cfg.subagent_model,
+        model=cfg.resolve_model(model) or cfg.subagent_model,
         timeout=cfg.timeout,
     )
 
 
-def _build_registry(cfg: Config) -> ToolRegistry:
+def _build_registry(cfg: Config, mcp_tools: list | None = None) -> ToolRegistry:
     """装配工具注册表。**整个进程只建一个**。
 
     工具实例是无状态的（同一次会话里可能被并发调用，实现上就要求它们不存状态），
@@ -283,6 +288,8 @@ def _build_registry(cfg: Config) -> ToolRegistry:
 
     Args:
         cfg: 运行配置，其中的路径与密钥决定各工具的参数。
+        mcp_tools: 已经连上的 MCP 工具（MCPTool 实例）。为 None 或空表示没有 MCP——
+            内置工具照常装配。
 
     Returns:
         注册好全部工具的注册表，注册顺序即 /tools 的显示顺序。
@@ -301,6 +308,11 @@ def _build_registry(cfg: Config) -> ToolRegistry:
     )
     for tool in tools:
         registry.register(tool)
+
+    # MCP 来的工具：名字已经是 "server__tool"，与内置工具不会重名。它们**在运行时**才有，
+    # 数量取决于哪些 server 连上了，所以由调用方连好之后传进来——这里只负责登记。
+    for mcp_tool in mcp_tools or []:
+        registry.register(mcp_tool)
 
     # 子智能体：**配了密钥才注册**。它是个"有构造参数"的工具（要注入 provider 工厂），
     # 没法像上面那样塞进元组统一加——位置不同，理由也不同，单独一段更清楚。
@@ -458,6 +470,15 @@ def _print_banner(cfg: Config, registry: ToolRegistry, width: int | None = None)
 
     line("模型", cfg.model)
     line("工作区", fit(str(cfg.workspace), inner - 6))
+    # 配置来源：用户说"我明明配了"时，第一眼要看的就是这个——到底是哪个文件在生效。
+    line("配置", fit(str(cfg.config_file), inner - 6) if cfg.config_file else "仅 .env / 环境变量")
+    # 模型别名表：只在配了 main/subagent 之外的别名时才显示（有别名就意味着
+    # spawn_subagent 可以按名挑模型，这是用户自己配的、不看一眼想不到的能力）。
+    extra_aliases = {
+        k: v for k, v in cfg.models.items() if k not in ("main", "subagent") and v != cfg.model
+    }
+    if extra_aliases:
+        line("别名", fit("、".join(f"{k}={v}" for k, v in extra_aliases.items()), inner - 6))
     # 子智能体单独一行、不进下面的工具清单：它是"随配置开关"的能力，值得一眼看到，
     # 而不是在工具名列表里被宽度截断掉（它还排在最后）。
     tools = [name for name in registry.list_tools() if name != "spawn_subagent"]
@@ -504,7 +525,11 @@ def _print_banner(cfg: Config, registry: ToolRegistry, width: int | None = None)
     print(f"{C.DIM}└{'─' * (inner - 2)}┘{C.RESET}", file=err)
     return err.getvalue()
 
-async def _serve(gateway: Gateway, provider: OpenAICompatProvider) -> int:
+async def _serve(
+    gateway: Gateway,
+    provider: OpenAICompatProvider,
+    mcp_manager: MCPClientManager | None = None,
+) -> int:
     """跑网关，直到某个渠道退出或用户按 Ctrl+C。
 
     这里只剩"启动"和"收尾"两件事了：**退出信号由 Gateway.run() 自己产生**——它在
@@ -516,6 +541,9 @@ async def _serve(gateway: Gateway, provider: OpenAICompatProvider) -> int:
     Args:
         gateway: 已装配好的网关。
         provider: 模型客户端，返回前关掉它的连接池。
+        mcp_manager: MCP 连接管理器。**留作兜底**——正常路径下它的连接由 _run 的 finally
+            负责断（谁创建谁关闭，且必须在同一个任务里）；万一走到这里还开着，也在返回前
+            断一次。重复调用 shutdown() 是安全的（没有连接时直接返回）。
 
     Returns:
         退出码：0 正常退出（/exit、Ctrl+D），130 被 Ctrl+C 打断。
@@ -528,6 +556,15 @@ async def _serve(gateway: Gateway, provider: OpenAICompatProvider) -> int:
         print("\\n[已中断]\\n", file=sys.stderr)
         raise
     finally:
+        if mcp_manager is not None:
+            # MCP 的 shutdown **必须在与 connect_all 同一个任务里**执行（见 agent.tools.mcp
+            # 模块文档）：手动 __aenter__ 进去的 anyio 任务组跨任务退出会撞 cancel scope 检查。
+            # _serve 与 _run 是同一个协程，所以这里算"同一个任务"；真正的主路径在 _run 的
+            # finally 上，这里只是兜底。
+            try:
+                await mcp_manager.shutdown()
+            except Exception:  # noqa: BLE001 - 收尾失败不该盖住退出码
+                logger.debug("[MCP] 兜底断开时出错", exc_info=True)
         try:
             await provider.aclose()
         except Exception:  # noqa: BLE001 - 关连接失败不影响退出码
@@ -547,7 +584,32 @@ async def _run(cfg: Config) -> int:
     Returns:
         退出码：0 正常退出（/exit、Ctrl+D），130 被 Ctrl+C 打断。
     """
-    registry = _build_registry(cfg)
+    # MCP：**先连、后建注册表**。工具清单是连上之后才知道的，顺序反了就少一批工具。
+    # 连接必须在当前任务里完成（手动 __aenter__ 的 anyio 任务组跨任务退出会撞检查），
+    # 而这里的 try/finally 保证"谁创建谁关闭"——不管后面是哪条路退出，连接都会被断掉。
+    mcp_manager = MCPClientManager(cfg.mcp_servers)
+    await mcp_manager.connect_all()
+    try:
+        return await _assemble_and_serve(cfg, mcp_manager)
+    finally:
+        await mcp_manager.shutdown()
+
+
+async def _assemble_and_serve(cfg: Config, mcp_manager: MCPClientManager) -> int:
+    """把 agent、渠道、网关装配起来跑，直到退出。
+
+    与 _run 分开，只为一件事：让 MCP 连接的 connect_all / shutdown 处在**同一个任务**里，
+    并且中间这段装配代码不必缩进一整层。装配顺序仍然是 _run 文档里那条：
+    注册表 → 模型客户端 → 网关 → 渠道注入。
+
+    Args:
+        cfg: 运行配置。
+        mcp_manager: 已连好的 MCP 管理器，它的工具会被登记进注册表。
+
+    Returns:
+        退出码。
+    """
+    registry = _build_registry(cfg, mcp_manager.get_tools())
 
     provider = OpenAICompatProvider(
         api_key=cfg.api_key,
@@ -627,7 +689,7 @@ async def _run(cfg: Config) -> int:
         if hasattr(other, "_clear_callback"):
             setattr(other, "_clear_callback", clear_history)
 
-    return await _serve(gateway, provider)
+    return await _serve(gateway, provider, mcp_manager)
 
 
 def main() -> int:
@@ -647,7 +709,9 @@ def main() -> int:
 
     try:
         cfg = Config.from_env()
-    except ValueError as exc:
+    except ConfigError as exc:
+        # 只拦 ConfigError：它是"用户写错了配置"，报出来让人去改文件；
+        # 其他异常是程序自己的 bug，不该被伪装成配置问题。
         print(f"配置错误：{exc}", file=sys.stderr)
         return 1
 
