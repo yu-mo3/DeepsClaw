@@ -6,7 +6,7 @@
 
 > 项目定位：一份"把 agent 该有的零件都装好"的参考实现。每一层都刻意拆开、每处取舍都写在注释里，方便你换掉其中一层而不动其他。
 
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.14%2B-3776AB?logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![MCP](https://img.shields.io/badge/MCP-supported-6E56CF)
 ![Channels](https://img.shields.io/badge/Channels-CLI%20%7C%20QQ-blue)
@@ -50,7 +50,7 @@
 
 ### 1. 环境要求
 
-- **Python 3.11+**（开发环境为 3.14；类型注解用的是 PEP 604 的 `X | None` 与 `from __future__ import annotations`）
+- **Python 3.14+**（开发环境为 3.14.2；类型注解用的是 PEP 604 的 `X | None` 与 `from __future__ import annotations`）
 - 一个 OpenAI 兼容接口的模型密钥（DeepSeek / 百炼 / 硅基流动 / OpenAI…都行）
 
 ### 2. 安装依赖

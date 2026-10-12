@@ -14,7 +14,7 @@
 - **截断**：结果拼完超过 MAX_OUTPUT_CHARS 就砍掉。博查开了 summary 后单条
   摘要动辄上千字，几条就够把上下文撑出一个大窟窿。
 
-关于密钥：它只从配置里来（.env 的 BOCHA_API_KEY），不进代码、不进日志。
+关于密钥：它只从配置里来（config.json 的 tools.bocha_api_key），不进代码、不进日志。
 缺密钥时工具**不抛异常**，而是返回一句"未配置"的说明——让 agent 能正常起
 来把话说完，比启动即崩更符合"工具失败是可读文本"的约定。
 
@@ -121,7 +121,7 @@ class WebSearchTool(Tool):
         if not self.api_key:
             return (
                 "错误：未配置博查 API key，联网搜索不可用。"
-                "请在项目根目录的 .env 中设置 BOCHA_API_KEY（可参照 .env.example）；"
+                "请在 config.json 的 tools.bocha_api_key 填上密钥"
                 "也可以先用工作区内已有的资料回答，并把这一步告诉用户。"
             )
 
@@ -178,7 +178,7 @@ def _read_error(response: httpx.Response) -> str | None:
         detail = response.text.strip()[:200]
         hints = {
             400: "请求参数不合法",
-            401: "API key 无效，请检查 .env 里的 BOCHA_API_KEY",
+            401: "API key 无效，请检查配置里的 tools.bocha_api_key",
             403: "账户余额不足，请到 open.bochaai.com 充值",
             429: "请求频率超限，请稍后重试",
         }

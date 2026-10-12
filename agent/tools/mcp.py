@@ -9,7 +9,7 @@ MCP 换了一种活法——能力由**外部进程**提供，本模块负责连
         ├─ session.list_tools() 拿到清单
         └─ 每个工具包成一个 MCPTool ─▶ 注册进 ToolRegistry ─▶ agent 就能调了
 
-于是"加能力"变成"往 mcp_servers/ 丢一个文件 + 在 .env 里登记一行"，agent 侧一行不用改。
+于是"加能力"变成"往 mcp_servers/ 丢一个文件 + 在 config.json 的 mcp_servers 里登记一行"，
 
 ## 为什么必须手动 __aenter__（不是风格问题，是会卡死）
 

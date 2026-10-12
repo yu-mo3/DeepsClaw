@@ -199,7 +199,7 @@ class ExecTool(Tool):
                 之后不再受进程当前目录变化的影响。
         """
         # 只用 abspath 不用 realpath：这里是把路径交给子进程当 cwd，不做沙箱边界
-        # 比较，保留软链接原样反而更贴近用户在 .env 里配置的路径。
+        # 比较，保留软链接原样反而更贴近用户在配置里写的路径。
         self.workspace = os.path.abspath(workspace)
 
     @property

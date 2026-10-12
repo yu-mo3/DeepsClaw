@@ -722,7 +722,7 @@ def main() -> int:
 
     if not cfg.workspace.is_dir():
         print(f"警告：工作区 {cfg.workspace} 不存在，文件工具将无法读写。"
-              "请检查 .env 里的 AGENT_WORKSPACE。", file=sys.stderr)
+              "请检查配置里的 workspace。", file=sys.stderr)
 
     # 横幅不在这一层打：它要展示工具清单，而工具是在 _run 里装配的（见那里的顺序说明）。
     try:
