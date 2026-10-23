@@ -616,9 +616,4 @@ class FeishuChannel(Channel):
 
 ---
 
-## License
 
-MIT
-
-> ⚠️ 仓库目前**还没有 `LICENSE` 文件**。GitHub 只有在检测到该文件时才会显示协议信息，
-> 建议补一个——把标准的 MIT 全文存成 `LICENSE` 即可。在此之前默认版权保留，他人无权直接复用。
