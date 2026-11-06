@@ -163,6 +163,10 @@ class AgentLoop:
         self._step = 0
         # 滑动窗口只记录最近若干次调用的指纹，超出自动丢弃。
         self._tool_window: deque[str] = deque(maxlen=self.LOOP_WINDOW_SIZE)
+        # 本轮内已算好的压缩结果：(压缩时的 messages 条数, 压缩后的列表)。
+        # 同一轮里 messages 只会追加，旧前缀不变时直接把新增消息接在压缩结果后面，
+        # 不必重新摘要（没有它，超预算的会话每步都会多调一次模型摘要）。
+        self._compaction_cache: tuple[int, list[dict]] | None = None
 
     async def run(self, user_input: str = "") -> str:
         """执行一轮 Agent 循环，返回最终给用户看的文本。
@@ -181,6 +185,7 @@ class AgentLoop:
         # 每轮重置：防爆针对的是"本次任务陷进死胡同"，用户上一轮问过什么不该算进来。
         self._tool_window.clear()
         self._step = 0
+        self._compaction_cache = None
 
         messages = self.context.build_messages(self.history, user_input)
         turn: list[dict] = []
@@ -275,11 +280,25 @@ class AgentLoop:
         if self.consolidator is None:
             return messages
 
+        # 同一轮里 messages 只追加：上一份压缩结果 + 新增消息仍然是合法历史，
+        # 直接拼起来即可。没有这层缓存时，只要历史持续超预算，每一步都会重新
+        # 调一次模型摘要，费用与延迟随步数线性放大（单轮最多 50 步）。
+        cached = self._compaction_cache
+        if cached is not None:
+            cached_len, cached_compacted = cached
+            if len(messages) >= cached_len:
+                candidate = cached_compacted + messages[cached_len:]
+                budget = self.consolidator.token_budget
+                if budget is None or self.consolidator.estimate_tokens(candidate) <= budget:
+                    logger.debug("复用上一份压缩结果（只追加了新消息）")
+                    return candidate
+
         compacted = await self.consolidator.maybe_consolidate(messages)
         if compacted is messages or len(compacted) >= len(messages):
             # 没压成、或压完没变短（旧消息本来就只剩几条），就没必要换一份发出去。
             return messages
 
+        self._compaction_cache = (len(messages), compacted)
         logger.debug(
             "本次请求使用压缩后的历史：%d 条 -> %d 条", len(messages), len(compacted)
         )
