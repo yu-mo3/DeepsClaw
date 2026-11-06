@@ -8,7 +8,7 @@
     "cheap": "deepseek-chat"
   },
   "workspace": ".",
-  "identity_file": "identity.md",
+  "identity_file": "../identity.md",
   "max_iterations": 50,
   "timeout": 120,
   "log_level": "INFO",
