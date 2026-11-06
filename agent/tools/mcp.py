@@ -65,6 +65,13 @@ TOOL_NAME_SEPARATOR = "__"
 #: server 多半起不来了，跳过比继续等更划算——用户还在终端前面等着。
 DEFAULT_CONNECT_TIMEOUT = 30.0
 
+#: 单次工具调用的默认超时（秒），与 exec 的 60 秒对齐。
+#:
+#: 没有它就等于把控制权交给外部进程：一个卡住的 MCP 工具会永远挂住主 agent，
+#: 而网关的入站处理是串行的，所有会话会一起卡死。超时后转成可读文本交回模型，
+#: 让它换条路——这比让整轮任务卡住强。
+DEFAULT_CALL_TIMEOUT = 60.0
+
 
 class MCPClientManager:
     """管理若干个 MCP Server 的连接与它们的工具。
@@ -271,7 +278,17 @@ class MCPClientManager:
             return "错误：MCP server {} 未连接，无法调用 {}".format(server_name, tool_name)
 
         try:
-            result = await session.call_tool(tool_name, arguments)
+            # 超时兜底：外部进程卡住时不能让它拖住整轮对话（见 DEFAULT_CALL_TIMEOUT）。
+            result = await asyncio.wait_for(
+                session.call_tool(tool_name, arguments), timeout=DEFAULT_CALL_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[MCP] [!] 调用 %s/%s 超时（超过 %ss）", server_name, tool_name, DEFAULT_CALL_TIMEOUT
+            )
+            return "错误：调用 {}/{} 超时（超过 {}s），该 MCP 工具无响应".format(
+                server_name, tool_name, DEFAULT_CALL_TIMEOUT
+            )
         except Exception as exc:  # noqa: BLE001 - 见 docstring：失败要变成文本
             logger.warning("[MCP] [!] 调用 %s/%s 失败：%s", server_name, tool_name, exc)
             return "错误：调用 {}/{} 失败 - {}: {}".format(
