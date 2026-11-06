@@ -37,6 +37,7 @@
       },
       "workspace": ".",
       "identity_file": "identity.md",
+      "skills_dir": "skills",
       "max_iterations": 50,
       "timeout": 120,
       "log_level": "INFO",
@@ -216,6 +217,8 @@ class Config:
             main / subagent 有固定含义，其余键供 spawn_subagent 的 model 参数按名引用。
         workspace: agent 的工作区根目录，文件工具只能在这个范围内读写。
         identity_file: 人设文件名，相对 workspace。
+        skills_dir: 技能目录（每个技能一个含 SKILL.md 的子目录），相对项目根目录。
+            与 workspace 无关：技能是给模型看的操作手册，不属于 agent 的可写范围。
         memory_file: 长期记忆文件（MEMORY.md）路径。为空字符串表示不使用长期记忆。
         token_budget: 单次请求的历史 token 预算（粗估）。为 None 表示关闭自动压缩。
         bocha_api_key: 博查搜索 API key；为空则联网搜索工具不可用，但不影响启动。
@@ -243,6 +246,7 @@ class Config:
     models: dict[str, str]
     workspace: Path
     identity_file: str
+    skills_dir: Path
     memory_file: Path
     token_budget: int | None
     bocha_api_key: str | None
@@ -291,7 +295,8 @@ class Config:
             f"Config(api_key={_mask(self.api_key)!r}, base_url={self.base_url!r}, "
             f"model={self.model!r}, models={sorted(self.models)!r}, "
             f"workspace={str(self.workspace)!r}, "
-            f"identity_file={self.identity_file!r}, memory_file={str(self.memory_file)!r}, "
+            f"identity_file={self.identity_file!r}, skills_dir={str(self.skills_dir)!r}, "
+            f"memory_file={str(self.memory_file)!r}, "
             f"token_budget={self.token_budget!r}, "
             f"bocha_api_key={_mask(self.bocha_api_key)!r}, "
             f"qq_app_id={self.qq_app_id!r}, qq_app_secret={_mask(self.qq_app_secret)!r}, "
@@ -368,6 +373,9 @@ class Config:
             models=models,
             workspace=_resolve_path(_pick(("AGENT_WORKSPACE",), data, "workspace") or "."),
             identity_file=_pick(("AGENT_IDENTITY_FILE",), data, "identity_file") or "identity.md",
+            skills_dir=_resolve_path(
+                _pick(("AGENT_SKILLS_DIR",), data, "skills_dir") or "skills"
+            ),
             memory_file=_resolve_path(
                 _pick(("AGENT_MEMORY_FILE",), data, "memory.file") or DATA_MEMORY_FILE
             ),

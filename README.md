@@ -140,6 +140,7 @@ echo "把 README 里的错别字找出来" | python main.py
 
   "workspace": ".",                       // 文件工具的沙箱根目录
   "identity_file": "identity.md",         // 人设文件（相对 workspace）
+  "skills_dir": "skills",                 // 技能目录（相对项目根目录）
   "max_iterations": 50,                   // 单轮最多调用几次模型
   "timeout": 120,                         // 单次请求超时（秒）
   "log_level": "INFO",

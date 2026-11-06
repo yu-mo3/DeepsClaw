@@ -363,7 +363,9 @@ def _build_agent(
         sink: 过程事件的接收方，为 None 时 agent 什么都不往外推（测试方便）。
     """
     workspace = str(cfg.workspace)
-    skills = SkillsLoader(os.path.join(workspace, "skills"))
+    # 技能目录与 workspace 无关（技能是给模型看的操作手册，不属于可写范围），
+    # 路径由 Config.skills_dir 决定，默认是项目根目录下的 skills/。
+    skills = SkillsLoader(str(cfg.skills_dir))
     context = ContextBuilder(
         workspace=workspace,
         identity_file=cfg.identity_file,
@@ -456,9 +458,8 @@ def _print_banner(cfg: Config, registry: ToolRegistry, width: int | None = None)
             used += step
         return kept + "…"
 
-    skills = 0
-    if cfg.workspace.is_dir():
-        skills = len(SkillsLoader(os.path.join(str(cfg.workspace), "skills")).list_skills())
+    # 技能数来自 cfg.skills_dir（与 workspace 无关，见 _build_agent 的说明）。
+    skills = len(SkillsLoader(str(cfg.skills_dir)).list_skills())
 
     # 顶框：标题居中。三段（左横线 + 标题 + 右横线）的显示宽度加起来必须正好是 inner，
     # 否则边框右边对不齐——中文按 2 列算，这里不能直接用 len。
