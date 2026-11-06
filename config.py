@@ -585,14 +585,19 @@ def _resolve_mcp_servers(data: dict) -> dict[str, dict]:
     简单式 `MCP_SERVERS=poetry=python mcp_servers/poetry_server.py`（多个用 ; 分隔），
     或完整 JSON。**环境变量优先于 config.json**，与其它配置项一致。
 
+    **路径归一化**（两种来源都会做）：MCP 子进程直接执行、不经过 shell，`args` 里的相对
+    路径按**进程 cwd** 解析。从别的目录执行 `python DeepsClaw/main.py` 时就会连不上。
+    所以这里把 `cwd` 默认成项目根目录，并把 `command` / `args` 里像路径的相对项解析成
+    绝对路径——启动目录不再影响 MCP 行为。
+
     Returns:
-        server 名 -> 配置（至少含 command / args）；没配时为空 dict。
+        server 名 -> 配置（至少含 command / args / cwd）；没配时为空 dict。
     """
     from_env_text = _get("MCP_SERVERS")
     if from_env_text:
         parsed = _parse_mcp_env(from_env_text)
         if parsed:
-            return parsed
+            return _normalize_mcp_servers(parsed)
         # 环境变量写了但解析不出来：继续用 config.json 的，别让一个笔误把功能整个关掉。
 
     servers = data.get("mcp_servers")
@@ -612,7 +617,58 @@ def _resolve_mcp_servers(data: dict) -> dict[str, dict]:
             "command": str(command),
             "args": [str(a) for a in cfg.get("args") or []],
         }
+    return _normalize_mcp_servers(result)
+
+
+def _normalize_mcp_servers(servers: dict[str, dict]) -> dict[str, dict]:
+    """对每个 server 做路径归一化，并丢掉没有 command 的条目。"""
+    result: dict[str, dict] = {}
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict) or not cfg.get("command"):
+            continue
+        result[str(name)] = _normalize_mcp_server(cfg)
     return result
+
+
+def _normalize_mcp_server(cfg: dict) -> dict:
+    """把一个 server 的配置归一化：cwd 默认项目根，命令与参数里的相对路径钉到项目根。
+
+    为什么需要见 `_resolve_mcp_servers` 的说明。归一化后的 cwd 一定是绝对路径，
+    命令的 PATH 查找（裸命令名如 "python"）保持原样，交给子进程自己找。
+    """
+    cwd = cfg.get("cwd")
+    return {
+        **cfg,
+        "command": _resolve_mcp_command(str(cfg["command"])),
+        "args": [_resolve_mcp_arg(str(a)) for a in cfg.get("args") or []],
+        "cwd": str(_resolve_path(str(cwd)) if cwd else PROJECT_ROOT),
+    }
+
+
+def _resolve_mcp_command(command: str) -> str:
+    """命令本身是相对路径（形如 ./bin/server）就按项目根解析；裸命令名保持原样。"""
+    if os.path.isabs(command):
+        return command
+    if "/" in command or "\\" in command:
+        return str(_resolve_path(command))
+    return command
+
+
+def _resolve_mcp_arg(arg: str) -> str:
+    """参数里像路径的项按项目根解析；普通参数（serve、--port）原样保留。
+
+    判定故意保守：只有以 ./ ../ 开头，或含路径分隔符**且确实命中项目内的文件/目录**时
+    才改写。否则 `@scope/pkg` 这类 npm 包名会被误伤（含 "/" 但并不是路径）。
+    """
+    if not arg or os.path.isabs(arg):
+        return arg
+    if arg.startswith(("./", "../", ".\\", "..\\")):
+        return str(_resolve_path(arg))
+    if "/" in arg or "\\" in arg:
+        candidate = _resolve_path(arg)
+        if candidate.exists():
+            return str(candidate)
+    return arg
 
 
 def _parse_mcp_env(text: str) -> dict[str, dict]:
