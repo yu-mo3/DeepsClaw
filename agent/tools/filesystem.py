@@ -23,6 +23,12 @@ from agent.tools.base import Tool
 # 单次读取返回给模型的字符上限。超出部分截断，防止一个超大文件把上下文撑爆。
 MAX_READ_CHARS = 16000
 
+#: 单次 list_dir 最多返回的条目数。
+#:
+#: read_file / exec / web_fetch 都有截断，唯独列目录没有。没有上限时，node_modules、
+#: venv、十万级目录会把上下文一次顶爆。超出部分只给数量提示，模型需要时再进子目录。
+MAX_DIR_ENTRIES = 500
+
 
 class _PathEscapeError(ValueError):
     """用户路径越出 workspace 边界（或无法安全判定归属）。"""
@@ -258,8 +264,13 @@ class ListDirTool(_WorkspaceTool):
         if not entries:
             return f"目录 {dir_path!r} 为空"
 
-        lines = [_format_entry(e) for e in entries]
+        lines = [_format_entry(e) for e in entries[:MAX_DIR_ENTRIES]]
         dirs = sum(1 for e in entries if _safe_is_dir(e))
+        if len(entries) > MAX_DIR_ENTRIES:
+            lines.append(
+                f"\n…（共 {len(entries)} 项，仅列出前 {MAX_DIR_ENTRIES} 项；"
+                f"要看其余请进子目录或缩小范围）"
+            )
         lines.append(f"\n共 {len(entries)} 项（{dirs} 个目录，{len(entries) - dirs} 个文件）")
         return "\n".join(lines)
 

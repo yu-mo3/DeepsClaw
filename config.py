@@ -389,8 +389,10 @@ class Config:
             web_enabled=web_enabled,
             web_host=_pick(("WEB_HOST",), data, "channels.web.host") or "127.0.0.1",
             web_port=_pick_int(("WEB_PORT",), data, "channels.web.port", 8080, minimum=1),
-            # 子智能体：密钥缺失时功能整体关闭；地址与模型名给了默认值，所以填一个 key 就能用。
-            subagent_api_key=_pick(("SUBAGENT_API_KEY",), data, "subagent.api_key") or api_key,
+            # 子智能体：**不配置密钥就不启用**，不回退主模型密钥。回退会让 has_subagent
+            # 恒为真（主密钥是必填项），从而总是注册 spawn_subagent——可它用的是百炼的
+            # base_url，拿主密钥去请求只会 401，而且要到第一次派活才暴露。
+            subagent_api_key=_pick(("SUBAGENT_API_KEY",), data, "subagent.api_key"),
             subagent_base_url=_pick(("SUBAGENT_BASE_URL",), data, "subagent.base_url")
             or DEFAULT_SUBAGENT_BASE_URL,
             subagent_model=subagent_model,

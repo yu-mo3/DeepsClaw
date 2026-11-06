@@ -150,7 +150,7 @@ echo "把 README 里的错别字找出来" | python main.py
   "tools":   { "bocha_api_key": "" },
 
   "subagent": {
-    "api_key": "",                        // 留空则回退主模型密钥
+    "api_key": "",                        // 留空则子智能体不可用；填主密钥可复用主模型账号
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
   },
 
