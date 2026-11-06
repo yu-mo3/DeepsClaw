@@ -255,7 +255,15 @@ class AgentLoop:
         finally:
             # 四个显式出口 + 取消 + 异常两条隐形出口，统一在这里收尾。逐个 return
             # 前手写 emit 一定会漏其中某一条。
-            await self._emit(TurnEndEvent(reply=reply, reason=reason))
+            event = TurnEndEvent(reply=reply, reason=reason)
+            try:
+                await self._emit(event)
+            except asyncio.CancelledError:
+                # 任务正在取消：finally 里的 await 会立刻再抛一次取消（取消状态尚未清除），
+                # turn_end 就永远到不了输出端——前端会一直显示"忙碌"。
+                # 用独立任务补发一次，保证「本轮结束」信号一定送达，再把取消继续抛出去。
+                asyncio.create_task(self._emit(event))
+                raise
 
     async def _compact_for_model(self, messages: list[dict]) -> list[dict]:
         """送给模型之前的历史压缩（没配压缩器时是空操作）。
@@ -541,8 +549,11 @@ def _repair_history(history: list[dict]) -> list[dict]:
     写上"的那一刻（Ctrl+C、断电、崩溃）。这段残缺历史一旦原样回传，接口会以结构非法
     直接返 400，而且这个会话从此再也打不开——比丢一轮对话严重得多。
 
-    修法是丢弃末尾这组未完成的调用；前面的历史都是成对完整的，保留下来。历史上会出现
-    这种情况的唯一入口就是崩溃，因此"从末尾往前丢"足够用，不需要做全量校验。
+    修法是按**组**校验并丢弃不完整的那一组；其余消息原样保留。
+
+    **不能"从末尾往前截"**：残段不一定在末尾——同一进程继续对话时，新消息会追加到
+    同一个文件、把残段夹在中间。旧实现一旦命中就直接 `return history[:index]`，
+    会把残段之后的所有合法轮次一起丢掉（数据丢失，且不回写磁盘、每次启动重放）。
 
     Args:
         history: 从会话文件读回的消息列表。
@@ -550,23 +561,39 @@ def _repair_history(history: list[dict]) -> list[dict]:
     Returns:
         可安全回传给接口的列表；无需修复时原样返回。
     """
-    # 结果按 tool_call_id 索引，且只在整组齐全时才算完成——半途而废的组同样要丢。
-    results: dict[str, dict] = {
-        m["tool_call_id"]: m for m in history if m.get("tool_call_id")
-    }
-    for index in range(len(history) - 1, -1, -1):
+    repaired: list[dict] = []
+    dropped_groups = 0
+    index = 0
+    total = len(history)
+    while index < total:
         message = history[index]
-        if message.get("role") != "assistant" or not message.get("tool_calls"):
+        repaired.append(message)
+        index += 1
+
+        is_call_group = message.get("role") == "assistant" and message.get("tool_calls")
+        if not is_call_group:
             continue
-        expected = [call.get("id") for call in message["tool_calls"]]
-        if all(call_id in results for call_id in expected):
-            continue
+
+        # 收集紧随其后的 tool 结果（正常格式里它们紧跟 assistant）。
+        group_start = len(repaired) - 1
+        while index < total and history[index].get("role") == "tool":
+            repaired.append(history[index])
+            index += 1
+
+        expected = {call.get("id") for call in message["tool_calls"]}
+        seen = {m.get("tool_call_id") for m in repaired[group_start + 1:]}
+        if expected - seen:
+            # 这组不完整：整组撤掉（assistant + 已收到的部分 tool 结果），
+            # 继续往后校验——后面的对话是合法的，没有理由跟着一起丢。
+            del repaired[group_start:]
+            dropped_groups += 1
+
+    if dropped_groups:
         logger.warning(
-            "会话历史末尾有 %d 次未完成的工具调用，已丢弃该残段（进程很可能被中断过）",
-            len(expected),
+            "会话历史里有 %d 组未完成的工具调用，已丢弃对应残段（进程很可能被中断过）",
+            dropped_groups,
         )
-        return history[:index]
-    return history
+    return repaired if dropped_groups else history
 
 
 def _tool_result_event(tool_call: ToolCallRequest, result: str, step: int) -> ToolResultEvent:
