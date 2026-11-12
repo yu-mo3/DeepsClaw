@@ -155,6 +155,14 @@ class _UnsafeURL(Exception):
     """URL 未通过安全检查（协议、主机名或解析出的 IP 落在禁止范围内）。"""
 
 
+class _NetworkBackendUnavailable(RuntimeError):
+    """无法安装 DNS 层校验后端。
+
+    此时抓取会被**拒绝**（fail-closed），而不是静默降级成"只做静态 URL 校验"——
+    后者会让 DNS rebinding 与"域名解析到内网"重新可行，而用户完全不知道防线已经退化。
+    """
+
+
 class _SafeNetworkBackend(httpcore.AnyIOBackend):
     """在 DNS 解析处做校验的网络后端。
 
@@ -298,15 +306,17 @@ def _build_transport() -> httpx.AsyncBaseTransport:
     - 换上 _SafeNetworkBackend，把"目标 IP 是否允许"的判定放在真正建立连接的
       那一刻，重定向与新建连接都会自动过这道闸。
 
-    ``_pool`` 是 httpx 的私有属性，私有 API 有随版本变动的风险；这里做了探测，
-    万一将来找不到就把安全检查降级到 _validate_url 这一层，并明确告警，而不是
-    在导入或运行时炸掉。
+    ``_pool`` 是 httpx 的私有属性，私有 API 有随版本变动的风险；探测不到时
+    **拒绝抓取**（fail-closed）而不是降级：静默降级会让 SSRF 防线退化，
+    而用户完全不知道。错误会由 execute 转成可读文本。
     """
     transport = httpx.AsyncHTTPTransport(verify=True, trust_env=False, retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
-        logger.warning("当前 httpx 版本不再暴露连接池网络后端，DNS 层校验已跳过")
-        return transport
+        raise _NetworkBackendUnavailable(
+            "当前 httpx 版本不再暴露连接池网络后端，无法启用 DNS 层 SSRF 校验；"
+            "为安全起见已拒绝抓取（fail-closed）。请把 httpx 升级/降级到受支持版本后重试。"
+        )
     pool._network_backend = _SafeNetworkBackend()
     return transport
 
@@ -388,6 +398,8 @@ class WebFetchTool(Tool):
                 body, truncated_bytes = await _read_body(response)
         except _UnsafeURL as exc:
             return f"错误：{exc}。出于安全考虑，只允许抓取公网地址。"
+        except _NetworkBackendUnavailable as exc:
+            return f"错误：{exc}"
         except httpx.TimeoutException:
             return f"错误：抓取超时（超过 {FETCH_TIMEOUT:g} 秒未完成），可以稍后重试或换个地址。"
         except httpx.HTTPError as exc:
