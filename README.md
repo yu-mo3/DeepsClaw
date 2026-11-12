@@ -593,7 +593,7 @@ class FeishuChannel(Channel):
 - **文件工具有沙箱**：只能读写 `workspace` 指定的目录，路径逃逸会被拒绝。
 - **命令执行是真实执行的**：`exec` 会真正运行命令，**不要给不可信的输入开放这个工具**。
 - **agent 会改文件**：默认人设要求它在改动用户代码前先确认，但这只是**提示词层面的约束**，不是沙箱。重要目录请自行备份，或把 `workspace` 指到一个安全位置。
-- **敏感文件**：`identity.md` 里已写明禁止读取 `.env` 等隐私文件——同样是提示词约束，不要把它当作访问控制。
+- **敏感文件有名字黑名单**：`read_file` / `write_file` 会拒绝 `.env`、`config.json`、`secrets.json`、`id_rsa` 等敏感文件（`.env.example` 等模板除外）。`identity.md` 里也写了禁止读 `.env`——但两者都不是完备的访问控制，真正的隔离仍靠 `workspace` 范围。
 
 ---
 

@@ -29,6 +29,35 @@ MAX_READ_CHARS = 16000
 #: venv、十万级目录会把上下文一次顶爆。超出部分只给数量提示，模型需要时再进子目录。
 MAX_DIR_ENTRIES = 500
 
+#: 一律禁读禁写的敏感文件名（按 basename 小写匹配）。
+#:
+#: 文件沙箱只限制"在工作区内"，而 .env / config.json 恰恰常在项目根——一旦
+#: workspace 指向项目根（模板默认就是 "."），密钥就落进可读范围。名字黑名单兜住
+#: 最常见的形态：它挡不住所有叫法的密钥文件，但能挡住最明显、也最危险的那几类。
+#: 配置模板（.env.example 等）不含真实密钥，不在拦截范围内。
+_SENSITIVE_NAMES = frozenset({
+    ".env", ".npmrc", ".pypirc", ".netrc", ".git-credentials",
+    "config.json", "credentials.json", "secrets.json", "token.json",
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+})
+
+#: 名字像 .env.*、但只是模板的文件，允许读写。
+_ENV_TEMPLATES = frozenset({".env.example", ".env.sample", ".env.template"})
+
+
+class _SensitiveFileError(ValueError):
+    """目标文件是敏感文件（可能包含密钥），禁止读写。"""
+
+
+def _sensitive_reason(path: str) -> str | None:
+    """判断路径是否属于敏感文件，返回拒绝原因；不敏感返回 None。"""
+    name = os.path.basename(path).lower()
+    if name in _SENSITIVE_NAMES:
+        return f"文件 {name!r} 属于敏感文件（可能包含密钥），已拒绝读写"
+    if name.startswith(".env.") and name not in _ENV_TEMPLATES:
+        return f"文件 {name!r} 属于敏感文件（可能包含密钥），已拒绝读写"
+    return None
+
 
 class _PathEscapeError(ValueError):
     """用户路径越出 workspace 边界（或无法安全判定归属）。"""
@@ -88,6 +117,12 @@ class _WorkspaceTool(Tool):
         if not inside:
             raise _PathEscapeError(f"路径 {user_path!r} 超出工作区范围，已拦截")
 
+        # 敏感文件（.env / config.json / 密钥文件）即使落在工作区内也拒绝。
+        # 放在这里而不是各工具的 execute 里：读、写共用同一份判定，不会漏。
+        reason = _sensitive_reason(absolute)
+        if reason:
+            raise _SensitiveFileError(reason)
+
         return absolute
 
 
@@ -127,7 +162,7 @@ class ReadFileTool(_WorkspaceTool):
     async def execute(self, file_path: str) -> str:
         try:
             path = self._resolve(file_path)
-        except _PathEscapeError as exc:
+        except (_PathEscapeError, _SensitiveFileError) as exc:
             return f"错误：{exc}"
 
         if os.path.isdir(path):
@@ -191,7 +226,7 @@ class WriteFileTool(_WorkspaceTool):
     async def execute(self, file_path: str, content: str) -> str:
         try:
             path = self._resolve(file_path)
-        except _PathEscapeError as exc:
+        except (_PathEscapeError, _SensitiveFileError) as exc:
             return f"错误：{exc}"
 
         parent = os.path.dirname(path)
@@ -247,7 +282,7 @@ class ListDirTool(_WorkspaceTool):
     async def execute(self, dir_path: str = ".") -> str:
         try:
             path = self._resolve(dir_path)
-        except _PathEscapeError as exc:
+        except (_PathEscapeError, _SensitiveFileError) as exc:
             return f"错误：{exc}"
 
         if not os.path.exists(path):
