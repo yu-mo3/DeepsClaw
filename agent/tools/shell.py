@@ -12,6 +12,11 @@
 删目录），单个文件的普通 ``rm`` / ``del`` 属于日常操作，默认放行。要放宽或收紧
 就往 deny_patterns 里增删条目，不必动 execute 的逻辑。
 
+**这条防线的边界必须说清楚**：deny_patterns 是**文本正则**，它挡得住"手滑的模型"，
+挡不住"被注入的模型"——先把危险脚本用 ``write_file`` 写出来、再 ``exec`` 执行，
+命令文本里看不到危险动作本身。真正的收紧方向是「允许清单 + 执行前确认」，那是
+另一个量级的设计；这里只补最常见的绕过写法，别把它当成沙箱。
+
 除此之外还有三道"防爆"，都是为了让"跑命令"不至于把 agent 拖死：
 
 - **超时**：单条命令最多跑 COMMAND_TIMEOUT 秒，到点杀进程并如实告知。否则
@@ -218,6 +223,18 @@ class ExecTool(Tool):
               | %0\s*\|\s*%0                                   # Windows fork bomb
               | \bkill\s+(?:-\w+\s+)*-1\b                      # 杀掉本用户全部进程
               | \bkillall5\b
+            """,
+        ),
+        # 10. "看起来无害"的批量删除/覆写——黑名单挡不住写脚本再执行（见模块文档），
+        #     但至少把这些常见的绕过式写法挡在门口。
+        _rule(
+            "绕过式批量删除或覆写",
+            r"""
+                \bgit\s+clean\b[^\n]*\s-[a-z]*[fdx]       # git clean -fdx：删掉全部未跟踪文件
+              | \bxargs\b[^\n]*\brm\b                    # find ... | xargs rm
+              | \bfind\b[^\n]*-exec\s+rm\b               # find -exec rm
+              | \b(?:shutil\.rmtree|os\.remove|os\.rmdir)\b    # python -c 里直接删
+              | \bmv\b[^\n]*\s/dev/null\b                # mv a /dev/null：文件从此消失
             """,
         ),
     ]

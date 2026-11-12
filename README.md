@@ -592,6 +592,8 @@ class FeishuChannel(Channel):
 - **密钥不要提交**：含密钥的 `config.json` 与 `.env` 都已在 `.gitignore` 里；要分享配置请用 `config.example.json`（它不含任何密钥）。
 - **文件工具有沙箱**：只能读写 `workspace` 指定的目录，路径逃逸会被拒绝。
 - **命令执行是真实执行的**：`exec` 会真正运行命令，**不要给不可信的输入开放这个工具**。
+  危险命令黑名单与子进程环境变量白名单只是降低误伤面；黑名单是文本正则，**防不住被注入的模型**
+  （写脚本再执行即可绕过），真正的隔离要靠受控的 `workspace` 与用户侧确认。
 - **agent 会改文件**：默认人设要求它在改动用户代码前先确认，但这只是**提示词层面的约束**，不是沙箱。重要目录请自行备份，或把 `workspace` 指到一个安全位置。
 - **敏感文件有名字黑名单**：`read_file` / `write_file` 会拒绝 `.env`、`config.json`、`secrets.json`、`id_rsa` 等敏感文件（`.env.example` 等模板除外）。`identity.md` 里也写了禁止读 `.env`——但两者都不是完备的访问控制，真正的隔离仍靠 `workspace` 范围。
 
