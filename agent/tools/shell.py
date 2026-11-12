@@ -18,7 +18,10 @@
   ``ping -t``、直接 ``python`` 这类会等输入的命令能让 agent 永远卡在同一步上；
 - **输出截断**：单次最多回给模型 MAX_OUTPUT_CHARS 字符，避免一句 ``cat 大文件``
   把上下文撑爆；
-- **stdin 接 DEVNULL**：命令读不到输入会自己结束，而不是静静地挂在那里。
+- **stdin 接 DEVNULL**：命令读不到输入会自己结束，而不是静静地挂在那里；
+- **环境变量白名单**：子进程只继承 PATH / COMSPEC / SYSTEMROOT 等系统变量。不传
+  ``env=`` 时子进程会继承完整 ``os.environ``，而密钥就在里面（config.py 优先读环境
+  变量），模型执行 ``env`` 就能把 ``LLM_API_KEY`` 打印进自己的上下文。
 
 典型用法::
 
@@ -43,6 +46,34 @@ COMMAND_TIMEOUT = 60.0
 
 #: 单次返回给模型的输出上限（字符），超出部分截断。
 MAX_OUTPUT_CHARS = 10000
+
+#: 子进程允许继承的环境变量（白名单）。
+#:
+#: 只放"启动子进程必需"的系统变量；密钥类变量（LLM_API_KEY / BOCHA_API_KEY /
+#: QQ_APP_SECRET / SUBAGENT_API_KEY …）一律不进入子进程。Windows 的环境变量键
+#: 不区分大小写，比较时统一转大写。
+ALLOWED_ENV_KEYS = frozenset({
+    # 跨平台
+    "PATH", "PATHEXT", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+    "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL",
+    "USER", "LOGNAME", "PWD",
+    # Windows 子进程启动必需（缺 COMSPEC / SYSTEMROOT 时 cmd 起不来）
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PROGRAMDATA", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+})
+
+
+def _child_env() -> dict[str, str]:
+    """构造喂给子进程的环境：只保留白名单内的键。
+
+    Returns:
+        当前环境里白名单过滤后的副本；密钥类变量被剔除。
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in ALLOWED_ENV_KEYS
+    }
 
 
 def _rule(label: str, pattern: str) -> tuple[str, re.Pattern[str]]:
@@ -253,6 +284,8 @@ class ExecTool(Tool):
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=self.workspace,
+                # 环境变量白名单：密钥类变量不进入子进程（否则 `env` 就能读走它们）。
+                env=_child_env(),
                 # stdin 接 DEVNULL：读不到输入的命令会立刻结束，而不是把这一步挂死。
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
